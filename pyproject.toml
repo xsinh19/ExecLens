@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "execlens"
+version = "0.1.0"
+description = "Electronic execution analytics and transaction cost analysis (TCA) on reproducible synthetic market data."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "xsinh19" }]
+keywords = [
+    "transaction-cost-analysis",
+    "execution-analytics",
+    "market-microstructure",
+    "polars",
+    "fastapi",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+# Lower bounds are the versions this project is developed and tested against;
+# exact versions are pinned in uv.lock for reproducible installs.
+dependencies = [
+    "duckdb>=1.5",
+    "fastapi>=0.142",
+    "numpy>=2.5",
+    "plotly>=7.1",
+    "polars>=1.44",
+    "pydantic>=2.13",
+    "streamlit>=1.64",
+    "typer>=0.27",
+    "uvicorn>=0.54",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28",
+    "mypy>=2.3",
+    "psutil>=7.2",
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "ruff>=0.16",
+]
+
+[project.scripts]
+execlens = "execlens.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/execlens"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "benchmarks", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF", # ruff-specific
+    "PT",  # pytest style
+    "NPY", # numpy-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer declares CLI options through default-argument calls by design.
+"src/execlens/cli.py" = ["B008"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+# ---------------------------------------------------------------------------
+# pytest / coverage
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+markers = ["slow: tests that take more than a few seconds"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["execlens"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    'if __name__ == "__main__":',
+]

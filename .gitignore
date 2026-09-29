@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments and secrets
+.venv/
+.env
+.streamlit/secrets.toml
+
+# Tool caches and reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.json
+coverage.xml
+htmlcov/
+
+# Data: only the small committed demo dataset (data/sample) and the regression
+# fixtures (tests/fixtures) are tracked. Everything generated locally is ignored.
+data/raw/*
+!data/raw/.gitkeep
+data/generated/
+data/derived/
+*.duckdb
+*.duckdb.wal
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
