@@ -170,7 +170,9 @@ def attach_interval_volume(
     O((trades + rows) log n) instead of scanning the tape once per order.
 
     Adds ``market_volume`` (Int64) and ``market_notional`` (Float64), both null
-    where ``end`` is null.
+    where ``end`` is null or the symbol has no trade data at all (unknown is
+    not the same as zero). An interval with trade data but no prints in it
+    has volume 0.
     """
     running = (
         trades.select("symbol", "timestamp", "price", "size")
@@ -182,9 +184,11 @@ def attach_interval_volume(
             (pl.col("price") * pl.col("size")).cum_sum().over("symbol").alias("_cum_notional"),
         )
     )
+    traded_symbols = trades.select("symbol").unique().with_columns(pl.lit(True).alias("_has_tape"))
     end_key = pl.coalesce(pl.col(end), pl.col(start)).alias("_end_key")
     upto_end = (
-        frame.with_columns(end_key)
+        frame.join(traded_symbols, on="symbol", how="left")
+        .with_columns(end_key)
         .sort("symbol", "_end_key")
         .join_asof(
             running,
@@ -211,14 +215,16 @@ def attach_interval_volume(
         .rename({"_cum_volume": "_start_volume", "_cum_notional": "_start_notional"})
         .drop("_trade_ts")
     )
-    has_end = pl.col(end).is_not_null()
+    known = pl.col(end).is_not_null() & pl.col("_has_tape").fill_null(False)
     return before_start.with_columns(
-        pl.when(has_end)
+        pl.when(known)
         .then(pl.col("_end_volume").fill_null(0) - pl.col("_start_volume").fill_null(0))
         .otherwise(None)
         .alias("market_volume"),
-        pl.when(has_end)
+        pl.when(known)
         .then(pl.col("_end_notional").fill_null(0.0) - pl.col("_start_notional").fill_null(0.0))
         .otherwise(None)
         .alias("market_notional"),
-    ).drop("_end_key", "_end_volume", "_end_notional", "_start_volume", "_start_notional")
+    ).drop(
+        "_has_tape", "_end_key", "_end_volume", "_end_notional", "_start_volume", "_start_notional"
+    )

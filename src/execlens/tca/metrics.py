@@ -10,8 +10,15 @@ Sign conventions (see ``docs/METRICS.md``)
 * **Cost metrics** (arrival cost, VWAP cost, effective spread):
   positive = worse execution for the order, negative = better.
 * **Markouts** use the *opposite* orientation:
-  positive = the market subsequently moved in the order's favour
-  (for a BUY, the mid rose above the fill price).
+  positive = favourable for the order (for a BUY, the later mid is above
+  the reference price).
+
+Two markouts are computed with the same formula and different reference
+prices: the *fill markout* is measured from the fill price (so it includes
+the half-spread and impact paid: a buy at the ask in a flat market has a
+negative fill markout) and the *mid markout* is measured from the
+contemporaneous mid (so it isolates the subsequent price move, the usual
+adverse-selection signal).
 
 All ``*_bps`` values are basis points: 1 bp = 0.01% = 1/10,000.
 """
@@ -24,8 +31,14 @@ from execlens.data.schemas import BPS
 
 
 def side_sign(side: pl.Expr) -> pl.Expr:
-    """+1 for BUY, -1 for SELL (sides are validated upstream)."""
-    return pl.when(side == "BUY").then(pl.lit(1, pl.Int8)).otherwise(pl.lit(-1, pl.Int8))
+    """+1 for BUY, -1 for SELL, null for anything else (sides are validated upstream)."""
+    return (
+        pl.when(side == "BUY")
+        .then(pl.lit(1, pl.Int8))
+        .when(side == "SELL")
+        .then(pl.lit(-1, pl.Int8))
+        .otherwise(pl.lit(None, pl.Int8))
+    )
 
 
 def mid_price(bid: pl.Expr, ask: pl.Expr) -> pl.Expr:
@@ -53,18 +66,23 @@ def effective_spread_bps(sign: pl.Expr, fill_price: pl.Expr, mid: pl.Expr) -> pl
 
     ``mid`` must be the latest valid midpoint at or before the fill time.
     Positive = paid more than the mid (for a buy); twice the half-spread paid.
+    Fills inside the quote give less than the quoted spread; only fills on
+    the favourable side of the mid give negative values.
     """
     return 2.0 * cost_bps(sign, fill_price, mid)
 
 
-def markout_bps(sign: pl.Expr, fill_price: pl.Expr, future_mid: pl.Expr) -> pl.Expr:
-    """Post-trade markout: ``side_sign * (future_mid - fill_price) / fill_price * 10,000``.
+def markout_bps(sign: pl.Expr, reference_price: pl.Expr, future_mid: pl.Expr) -> pl.Expr:
+    """Post-trade markout: ``side_sign * (future_mid - reference) / reference * 10,000``.
 
-    POSITIVE = FAVOURABLE subsequent move for the order (opposite orientation
-    to the cost metrics). Negative markouts after buys mean the price fell
-    after we bought (adverse selection / temporary impact reversal).
+    POSITIVE = FAVOURABLE for the order (opposite orientation to the cost
+    metrics). With ``reference`` = the fill price this is the spec's fill
+    markout, approximately ``-effective_spread / 2 + mid move``; with
+    ``reference`` = the mid at the fill it is the mid-to-mid markout, the
+    subsequent price move alone. Persistently negative *mid* markouts after
+    buys mean prices tended to fall after the order bought (adverse selection).
     """
-    return sign * (future_mid - fill_price) / fill_price * BPS
+    return sign * (future_mid - reference_price) / reference_price * BPS
 
 
 def safe_ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:

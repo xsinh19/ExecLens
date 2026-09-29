@@ -21,7 +21,8 @@ def random_fills(orders: pl.DataFrame, seed: int) -> pl.DataFrame:
     for order in orders.iter_rows(named=True):
         n = int(rng.integers(0, 5))  # includes orders with no fills
         horizon = order["execution_horizon_seconds"] or 30.0
-        offsets = np.sort(rng.uniform(0.0, horizon, size=n))
+        # Up to 20% past the horizon, so interval extension is exercised too.
+        offsets = np.sort(rng.uniform(0.0, 1.2 * horizon, size=n))
         quantities = (
             rng.multinomial(int(order["quantity"] * rng.uniform(0.3, 1.0)), [1 / n] * n)
             if n
@@ -102,4 +103,4 @@ def test_comparison_detects_disagreement() -> None:
 def test_reference_columns_cover_every_markout_horizon() -> None:
     columns = reference_columns((5, 15))
     assert "markout_5s_bps" in columns
-    assert "markout_15s_missing_fills" in columns
+    assert "markout_15s_unavailable_fills" in columns

@@ -4,7 +4,7 @@
 into two result tables:
 
 * **fill level** - contemporaneous quote context, effective spread and
-  markouts for every fill;
+  fill / mid markouts for every fill;
 * **order level** - arrival context, average fill price, completion,
   duration, interval market VWAP and volume, arrival cost, VWAP cost,
   quantity-weighted effective spread / quoted spread / markouts, and
@@ -18,8 +18,14 @@ Formulas come from :mod:`execlens.tca.metrics` only.
 Aggregation rule for fill-weighted order metrics (effective spread, average
 quoted spread, markouts): the order value is reported only when *every* fill
 has valid market context for that metric; otherwise it is null and the number
-of affected fills is reported alongside, so missing observations are never
-silently averaged away.
+of affected fills is reported alongside (``n_fills_without_quote``,
+``markout_{h}s_unavailable_fills``), so unavailable observations are never
+silently averaged away. Mid markouts need both, a fresh quote at the fill and
+an observation at ``t + h``.
+
+Benchmark interval: ``[arrival, max(arrival + horizon, last fill)]`` when a
+horizon is given (the configured horizon, extended if executions ran past
+it), otherwise ``[arrival, last fill]``.
 """
 
 from __future__ import annotations
@@ -86,7 +92,12 @@ def fill_columns(horizons: tuple[int, ...]) -> list[str]:
     markouts = [
         c
         for h in horizons
-        for c in (f"future_mid_{h}s", f"markout_{h}s_status", f"markout_{h}s_bps")
+        for c in (
+            f"future_mid_{h}s",
+            f"markout_{h}s_status",
+            f"markout_{h}s_bps",
+            f"mid_markout_{h}s_bps",
+        )
     ]
     return [
         "fill_id",
@@ -148,7 +159,8 @@ def order_columns(horizons: tuple[int, ...]) -> list[str]:
         "avg_contemporaneous_spread_bps",
         "n_fills_without_quote",
         *[f"markout_{h}s_bps" for h in horizons],
-        *[f"markout_{h}s_missing_fills" for h in horizons],
+        *[f"mid_markout_{h}s_bps" for h in horizons],
+        *[f"markout_{h}s_unavailable_fills" for h in horizons],
     ]
 
 
@@ -181,12 +193,16 @@ def build_fill_plan(
         )
     )
     for h in config.markout_horizons_seconds:
+        future_mid = pl.col(f"future_mid_{h}s")
         plan = attach_future_mid(
             plan, quotes, last_quote, horizon_seconds=h, tolerance=tol
         ).with_columns(
-            markout_bps(pl.col("side_sign"), pl.col("price"), pl.col(f"future_mid_{h}s")).alias(
+            markout_bps(pl.col("side_sign"), pl.col("price"), future_mid).alias(
                 f"markout_{h}s_bps"
-            )
+            ),
+            markout_bps(pl.col("side_sign"), pl.col("fill_mid"), future_mid).alias(
+                f"mid_markout_{h}s_bps"
+            ),
         )
     return plan.select(fill_columns(config.markout_horizons_seconds)).sort(
         "order_id", "timestamp", "fill_id"
@@ -222,7 +238,11 @@ def build_order_plan(
                 for h in horizons
             ],
             *[
-                pl.col(f"markout_{h}s_bps").null_count().alias(f"markout_{h}s_missing_fills")
+                (pl.col(f"mid_markout_{h}s_bps") * qty).sum().alias(f"_mid_markout_{h}s_num")
+                for h in horizons
+            ],
+            *[
+                pl.col(f"markout_{h}s_bps").null_count().alias(f"markout_{h}s_unavailable_fills")
                 for h in horizons
             ],
         )
@@ -237,15 +257,17 @@ def build_order_plan(
     ).join(per_order, on="order_id", how="left")
 
     counts = ["executed_quantity", "n_fills", "n_fills_without_quote"] + [
-        f"markout_{h}s_missing_fills" for h in horizons
+        f"markout_{h}s_unavailable_fills" for h in horizons
     ]
     horizon_us = (pl.col("execution_horizon_seconds") * 1_000_000).round(0).cast(pl.Int64)
+    horizon_end = pl.col("arrival_timestamp") + pl.duration(microseconds=horizon_us)
     plan = plan.with_columns(
         *[pl.col(c).fill_null(0) for c in counts],
         pl.col("executed_notional").fill_null(0.0),
         pl.col("arrival_timestamp").alias("benchmark_start"),
+        # The configured horizon, extended to the last fill if executions ran past it.
         pl.when(pl.col("execution_horizon_seconds").is_not_null())
-        .then(pl.col("arrival_timestamp") + pl.duration(microseconds=horizon_us))
+        .then(pl.max_horizontal(horizon_end, pl.col("last_fill_timestamp")))
         .otherwise(pl.col("last_fill_timestamp"))
         .alias("benchmark_end"),
     )
@@ -277,9 +299,15 @@ def build_order_plan(
         .then(pl.col("_quoted_spread_num") / executed)
         .alias("avg_contemporaneous_spread_bps"),
         *[
-            pl.when((pl.col("n_fills") > 0) & (pl.col(f"markout_{h}s_missing_fills") == 0))
+            pl.when((pl.col("n_fills") > 0) & (pl.col(f"markout_{h}s_unavailable_fills") == 0))
             .then(pl.col(f"_markout_{h}s_num") / executed)
             .alias(f"markout_{h}s_bps")
+            for h in horizons
+        ],
+        *[
+            pl.when(all_fills_have_quote & (pl.col(f"markout_{h}s_unavailable_fills") == 0))
+            .then(pl.col(f"_mid_markout_{h}s_num") / executed)
+            .alias(f"mid_markout_{h}s_bps")
             for h in horizons
         ],
     )

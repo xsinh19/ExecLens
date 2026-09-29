@@ -6,7 +6,7 @@ The code that implements each formula is `src/execlens/tca/metrics.py`
 (formulas), `src/execlens/tca/alignment.py` (point-in-time market context) and
 `src/execlens/tca/engine.py` (aggregation). The same numbers are recomputed by
 the loop-based reference implementation in `src/execlens/tca/reference.py`,
-and the worked examples below are the unit tests in
+and the worked examples below are unit tests in
 `tests/unit/test_tca_formulas.py`.
 
 > All market data in ExecLens is **synthetic** and all executions are
@@ -21,7 +21,7 @@ and the worked examples below are the unit tests in
 |---|---|
 | Side sign | `side_sign = +1` for **BUY**, `-1` for **SELL** |
 | **Cost metrics** (arrival cost, VWAP cost, effective spread) | **positive = worse** execution for the order, negative = better |
-| **Markouts** | **positive = favourable** subsequent move for the order (the *opposite* orientation to costs) |
+| **Markouts** | **positive = favourable** for the order (the *opposite* orientation to costs) |
 | Basis point | 1 bp = 0.01% = 1/10,000; `x_bps = x_fraction * 10,000` |
 | Timestamps | timezone-aware UTC, microsecond precision |
 | Quantities | integer shares |
@@ -43,17 +43,25 @@ available when the order or fill happened.
 | Situation | Status | Effect |
 |---|---|---|
 | a quote at or before `t`, no older than the stale tolerance (default **30 s**) | `OK` | prices used |
-| latest prior quote older than the tolerance | `STALE` | prices withheld (null); dependent metrics unavailable; order flagged |
-| no quote at or before `t` | `MISSING` | same as stale |
+| latest prior quote older than the tolerance | `STALE` | prices withheld (null); dependent metrics unavailable; the order is flagged `STALE_MARKET_DATA` |
+| no quote at or before `t` | `MISSING` | the same, flagged `MISSING_MARKET_DATA` |
 
-* A quote stamped exactly at `t` counts as prior (`<=`).
+Details:
+
+* A quote stamped exactly at `t` counts as prior (`<=`, as the build spec
+  requires). With coarse feed timestamps, a quote stamped at the same instant
+  as a fill may already show the fill's own effect, for example the offer it
+  just lifted. A production system would use exchange sequence numbers or a
+  small latency offset; ExecLens documents the `<=` convention instead.
 * Several quotes with the same timestamp: the last one in input order wins (it
   is the final state at that instant).
 * Stale prices are never forward-filled. The tolerance is a data-quality
-  policy, configurable per run (`TcaConfig.stale_quote_tolerance_seconds`,
-  env `EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS`, CLI `--stale-tolerance`).
-  In real feeds an unchanged quote is still live, so for illiquid instruments
-  the tolerance should be set wider.
+  policy, configurable per run (`TcaConfig.stale_quote_tolerance_seconds`, env
+  `EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS`, CLI `--stale-tolerance`). In real
+  feeds an unchanged quote is still live, so for illiquid instruments the
+  tolerance should be wider.
+* ExecLens has no trading calendar. "The data covers time `t`" means that some
+  quote for the symbol is stamped at or after `t` anywhere in the dataset.
 
 Future market data is used in exactly one place, on purpose: **markouts** (§10).
 
@@ -121,7 +129,8 @@ roughly *half* a spread relative to the mid.
 **Where ExecLens reports it.**
 * `arrival_spread`, `arrival_spread_bps`: the quote prevailing at order arrival.
 * `avg_contemporaneous_spread_bps`: quantity-weighted average of the quoted
-  spread (bps) prevailing at each fill.
+  spread (bps) prevailing at each fill. It follows the same all-fills rule as
+  effective spread (§9).
 
 **Limitations.** The quoted spread applies only to the displayed size; larger
 orders typically pay more (market impact).
@@ -195,15 +204,17 @@ reads cost differences as causal.
 
 ## 8. Market VWAP and VWAP cost
 
-**Interval.** The benchmark interval of an order is the closed interval
+**Benchmark interval.** A closed interval:
 
 ```
-[arrival_timestamp, arrival_timestamp + execution_horizon_seconds]   if a horizon is given
-[arrival_timestamp, last_fill_timestamp]                             otherwise
+[arrival, max(arrival + execution_horizon, last_fill)]   if a horizon is given
+[arrival, last_fill]                                     otherwise
 ```
 
-Trades stamped exactly at either endpoint are included. With no horizon and no
-fills there is no interval, and VWAP is unavailable.
+That is, the configured horizon, extended to the last fill if executions ran
+past it, so the benchmark always covers every fill. Trades stamped exactly at
+either endpoint are included. With no horizon and no fills there is no
+interval, and VWAP is unavailable.
 
 **Market VWAP.**
 
@@ -211,8 +222,9 @@ fills there is no interval, and VWAP is unavailable.
 market_vwap = sum(trade_price_i * trade_size_i) / sum(trade_size_i)      over market trades in the interval
 ```
 
-If no market volume traded in the interval, VWAP is **unavailable**: the
-engine never divides by zero.
+If no volume traded in the interval, `market_volume` is 0 and VWAP is
+**unavailable**: the engine never divides by zero. If the symbol has **no
+trade data at all**, market volume is unknown (null), not zero.
 
 **VWAP cost.**
 
@@ -228,8 +240,11 @@ cost is (100.08 - 100.09) / 100.09 * 10,000 = **-0.999 bps**, slightly better
 than VWAP. The SELL averaged 100.04: -1 * (100.04 - 100.09) / 100.09 * 10,000
 = **+4.995 bps**, worse than VWAP.
 
-**Interpretation.** "Did I trade at a price typical of the market while I was
-trading?" It removes most of the market drift that pollutes arrival cost.
+**Interpretation.** "Did I trade at a price typical of the market over the
+benchmark interval?" For orders that trade steadily through their horizon, it
+removes much of the market drift that pollutes arrival cost. For an order that
+finishes early in a long horizon, the VWAP also reflects prices after the
+order stopped trading.
 
 **Limitations.**
 * If the order itself is a large share of interval volume, VWAP partly
@@ -237,6 +252,8 @@ trading?" It removes most of the market drift that pollutes arrival cost.
   Read it together with participation (§11).
 * VWAP can be gamed by trading passively along with volume; a good VWAP cost
   with a bad arrival cost means the order tracked a market that moved away.
+* An interval running past the end of the trade data is truncated silently,
+  because a quiet market cannot be told apart from missing data.
 * In ExecLens's synthetic market the tape does not contain the simulated
   fills, so market VWAP excludes the order's own trades.
 
@@ -256,16 +273,22 @@ For each fill, using the latest valid mid **at or before** the fill:
 effective_spread_bps = 2 * side_sign * (fill_price - mid) / mid * 10,000
 ```
 
-Order level: quantity-weighted mean over fills.
+Order level: quantity-weighted mean over fills, **reported only if every fill
+has a fresh quote** (`n_fills_without_quote = 0`). Otherwise it is null and
+`n_fills_without_quote` says how many fills lacked context.
 
 **Sign convention.** Positive = paid more than the mid (buy) or received less
-(sell). Fills exactly at the mid give 0; price improvement inside the spread
-in the order's favour gives a negative value.
+(sell). A fill at the touch gives the quoted spread; a fill inside the quote
+(price improvement) gives less than the quoted spread but is still positive
+while it is on the far side of the mid. A fill exactly at the mid gives 0, and
+only fills on the order's favourable side of the mid give negative values.
 
 **Examples.**
 * BUY at the ask 100.02 with mid 100.00: 2 * 0.02 / 100 * 10,000 = **4 bps**,
   which equals the quoted spread (a fill at the touch).
 * SELL at the bid 99.98 with mid 100.00: 2 * (-1) * (-0.02) / 100 * 10,000 = **4 bps**.
+* BUY at 10.005 against 9.99 / 10.01 (mid 10.00, quoted 20 bps): **+10 bps**,
+  price improvement that halves the spread paid.
 * Worked example: B1-1 at 100.04 vs mid 100.02 → 400 / 100.02 = 3.9992 bps;
   B1-2 at 100.10 vs mid 100.08 → 400 / 100.08 = 3.9968 bps; order value
   (100 * 3.9992 + 200 * 3.9968) / 300 = **3.9976 bps**.
@@ -277,23 +300,39 @@ means the fills walked through the touch (impact).
 
 **Limitations.** It measures cost against the contemporaneous mid only. It
 ignores what happened afterwards (see markouts) and what the order did to the
-market before the fill.
+market before the fill. The all-fills rule is conservative: orders with many
+fills are more likely to have one stale fill, so the orders that report the
+metric lean towards smaller, shorter ones. The dashboard and summaries show
+how many orders contributed.
 
 ---
 
 ## 10. Markouts (post-trade price movement)
 
-For a fill at time `t` and horizon `h` in {10 s, 30 s, 60 s, 300 s}:
+For a fill at time `t` and horizon `h` in {10 s, 30 s, 60 s, 300 s}, ExecLens
+reports two markouts that share one formula and differ only in the reference
+price:
 
 ```
-markout_bps(h) = side_sign * (future_mid(t + h) - fill_price) / fill_price * 10,000
+markout_bps(h)     = side_sign * (future_mid(t + h) - fill_price) / fill_price * 10,000
+mid_markout_bps(h) = side_sign * (future_mid(t + h) - fill_mid)   / fill_mid   * 10,000
 ```
 
-> **Sign convention: positive = FAVOURABLE.** The market subsequently moved in
-> the order's direction: after a buy the mid rose above the price paid.
-> This is the **opposite orientation to the cost metrics**, where positive
-> means worse. The convention is repeated in the code docs, the API schema
-> descriptions and the dashboard labels.
+> **Sign convention: positive = FAVOURABLE.** After a buy, the later mid is
+> above the reference price. This is the **opposite orientation to the cost
+> metrics**, where positive means worse. The convention is repeated in the
+> code docs, the API schema descriptions and the dashboard labels.
+
+**What each one measures.**
+
+* The **fill markout** (the build spec's formula) is measured from the price
+  actually paid, so it is approximately
+  `-effective_spread / 2 + mid move after the fill`. A buy at the ask in a
+  perfectly flat market has a *negative* fill markout of half the spread.
+* The **mid markout** removes the spread paid and isolates the subsequent
+  price move, which is the usual adverse-selection signal. Persistently
+  negative mid markouts after buys mean prices tended to fall after the order
+  bought.
 
 **Future-mid lookup methodology.** `future_mid(t + h)` is the mid of the
 prevailing quote at `t + h`, that is, the latest quote with timestamp
@@ -310,53 +349,64 @@ on purpose.
 
 **Aggregation.** The order value is the quantity-weighted mean over fills, and
 it is reported **only if every fill has an available observation** at that
-horizon. Otherwise the value is null and `markout_{h}s_missing_fills` counts the
-affected fills. Missing observations are never averaged away silently.
+horizon; the mid markout additionally needs a fresh quote at every fill.
+Otherwise the value is null and `markout_{h}s_unavailable_fills` counts the
+fills without an observation (missing or stale). Unavailable observations are
+never averaged away silently.
 
 **Examples.**
-* BUY at 100.02, mid 60 s later 100.10: +(0.08 / 100.02) * 10,000 = **+8.0 bps** (favourable).
-* SELL at 99.98, mid later 100.10: -(0.12 / 99.98) * 10,000 = **-12.0 bps** (adverse).
-* Worked example, B1 at 10 s: B1-1 bought at 100.04 and the mid at t22 is
-  100.08, giving +400 / 100.04 = +3.998 bps; B1-2 bought at 100.10 and the mid
-  at t35 is 100.08, giving -200 / 100.10 = -1.998 bps. The quantity-weighted
-  order markout is (100 * 3.998 - 200 * 1.998) / 300 = +0.0008 bps.
+* Flat market 9.99 / 10.01, BUY at 10.01: fill markout
+  (10.00 - 10.01) / 10.01 * 10,000 = **-9.99 bps** (half the 20 bps effective
+  spread), mid markout **0**: the market did not move against the order.
+* BUY at 100.02, mid later 100.10: fill markout +(0.08 / 100.02) * 10,000 = **+8.0 bps**.
+* SELL at 99.98, mid later 100.10: fill markout -(0.12 / 99.98) * 10,000 = **-12.0 bps**.
+* Worked example, B1 at 10 s. B1-1 bought at 100.04 when the mid was 100.02,
+  and the mid at t22 is 100.08: fill markout +400 / 100.04 = +3.998 bps, mid
+  markout +600 / 100.02 = +5.999 bps. B1-2 bought at 100.10 (mid 100.08) and
+  the mid at t35 is 100.08: fill markout -200 / 100.10 = -1.998 bps, mid
+  markout 0. Order values: fill (100 * 3.998 - 200 * 1.998) / 300 = +0.0008
+  bps; mid 100 * 5.999 / 300 = +2.000 bps.
 
-**Interpretation.** Markouts reveal what the fill "knew". Consistently negative
-markouts after buys mean the order bought just before prices fell. That is
-the signature of adverse selection or of temporary impact reverting. Short
-horizons (10–60 s) show microstructure effects; longer horizons (300 s) are
-dominated by general market moves.
+**Interpretation.** Short horizons (10–60 s) show microstructure effects;
+longer horizons (300 s) are dominated by general market moves. Read fill
+markouts together with effective spread, and use mid markouts to ask "did the
+market move against the order after it traded?".
 
-**Limitations.** Long-horizon markouts are noisy (market volatility swamps
-execution effects), and fills near the end of the data have no observation.
-In ExecLens's synthetic market simulated fills have no permanent impact, so
-negative markouts come from paying the spread plus temporary impact, which
-the future mid does not include.
+**Limitations.** Long-horizon markouts are noisy (volatility swamps execution
+effects), and fills near the end of the data have no observation. Coverage is
+judged against the symbol's last quote in the whole dataset, so a fill just
+before a session close may be `OK` if a later session is in the file and
+`MISSING` if the file ends at that close. In ExecLens's synthetic market,
+simulated fills have no permanent impact, so mid markouts of simulated
+executions show only exogenous price moves.
 
 ---
 
 ## 11. Participation rate and quantity / market volume
 
 ```
-participation_rate        = executed_quantity  / market_volume_in_interval
-quantity_to_market_volume = requested_quantity / market_volume_in_interval
+participation_rate        = executed_quantity  / market_volume_in_benchmark_interval
+quantity_to_market_volume = requested_quantity / market_volume_in_benchmark_interval
 ```
 
-Both are unavailable when market volume in the interval is zero or the interval
-is undefined.
+Both are unavailable when market volume in the interval is zero, unknown or
+the interval is undefined.
 
 **Example.** An order executes 300 shares while 600 shares trade in its
 interval, so participation = **0.5 (50%)**.
 
-**Interpretation.** How much of the market the order was. High participation
-(the dashboard highlights above 25%) is associated with larger market impact
-and with VWAP benchmarks that partly measure the order itself. A POV strategy
-targets a fixed participation rate.
+**Interpretation.** How much of the market the order was over its benchmark
+interval. High participation (flagged above 25% by default) is associated
+with larger market impact and with VWAP benchmarks that partly measure the
+order itself. A POV strategy targets a fixed participation rate.
 
-**Limitations.** In ExecLens's synthetic market the order's own fills are not
-printed to the tape, so `market_volume` excludes them. Participation is then
-"our shares per share traded by others". In real data, where your own prints
-are on the tape, the conventional denominator includes them.
+**Limitations.** The rate is averaged over the whole interval. An order that
+trades everything in the first seconds of a long horizon shows a low average
+participation although it was the market while it traded. In ExecLens's
+synthetic market the order's own fills are not printed to the tape, so
+`market_volume` excludes them and participation is "our shares per share
+traded by others". In real data, where your own prints are on the tape, the
+conventional denominator includes them.
 
 ---
 
@@ -383,8 +433,9 @@ same as one the strategy failed to execute; ExecLens has no cancel events.
 ## 13. Portfolio-level aggregation
 
 `src/execlens/tca/aggregation.py` reports, for each metric, the number of
-orders where it is available and its **median**, **mean** and **p95**
-(linear interpolation between order statistics). It also reports:
+orders where it is available and its **median**, **mean**, **p5** and **p95**
+(linear interpolation between order statistics). For costs the adverse tail
+is p95; for markouts and completion it is p5. It also reports:
 
 * **notional-weighted arrival cost** =
   `sum(arrival_cost_bps_i * executed_notional_i) / sum(executed_notional_i)`,

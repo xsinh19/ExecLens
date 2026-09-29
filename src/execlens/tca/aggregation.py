@@ -2,14 +2,17 @@
 
 Averages across orders are reported two ways where it matters:
 
-* simple statistics over orders (median / mean / p95) describe the
+* simple statistics over orders (median / mean / p5 / p95) describe the
   *typical order*;
 * the notional-weighted mean arrival cost describes the cost of the
   *whole traded book* (big orders count more), which is what a desk pays.
 
 Percentiles use linear interpolation between order statistics (the NumPy
-default). Every statistic ignores orders where the metric is unavailable and
-reports how many orders contributed.
+default). For cost metrics the adverse tail is p95; for markouts and
+completion (higher = better) it is p5. :class:`MetricStats` ignores orders
+where the metric is unavailable and reports how many orders contributed
+(``available``); :func:`summarize_by` reports group means over the orders
+where each metric is available.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ class MetricStats(BaseModel):
     available: int
     mean: float | None
     median: float | None
+    p5: float | None
     p95: float | None
 
 
@@ -45,6 +49,7 @@ class TcaSummary(BaseModel):
     effective_spread_bps: MetricStats
     participation_rate: MetricStats
     markout_bps: dict[str, MetricStats]
+    mid_markout_bps: dict[str, MetricStats]
     flagged_orders: int | None = None
     flagged_fraction: float | None = None
 
@@ -60,11 +65,12 @@ def _float_or_none(value: object) -> float | None:
 def metric_stats(orders: pl.DataFrame, column: str) -> MetricStats:
     values = orders[column].drop_nulls()
     if values.is_empty():
-        return MetricStats(available=0, mean=None, median=None, p95=None)
+        return MetricStats(available=0, mean=None, median=None, p5=None, p95=None)
     return MetricStats(
         available=values.len(),
         mean=_float_or_none(values.mean()),
         median=_float_or_none(values.median()),
+        p5=_float_or_none(values.quantile(0.05, interpolation="linear")),
         p95=_float_or_none(values.quantile(0.95, interpolation="linear")),
     )
 
@@ -95,6 +101,7 @@ def summarize_orders(orders: pl.DataFrame) -> TcaSummary:
     if "is_flagged" in orders.columns:
         flagged = int(orders["is_flagged"].sum())
         flagged_fraction = flagged / orders.height if orders.height else None
+    horizons = markout_horizons(orders)
     return TcaSummary(
         analyzed_orders=orders.height,
         orders_with_fills=int((orders["n_fills"] > 0).sum()),
@@ -108,8 +115,11 @@ def summarize_orders(orders: pl.DataFrame) -> TcaSummary:
         vwap_cost_bps=metric_stats(orders, "vwap_cost_bps"),
         effective_spread_bps=metric_stats(orders, "effective_spread_bps"),
         participation_rate=metric_stats(orders, "participation_rate"),
-        markout_bps={
-            f"{h}s": metric_stats(orders, f"markout_{h}s_bps") for h in markout_horizons(orders)
+        markout_bps={f"{h}s": metric_stats(orders, f"markout_{h}s_bps") for h in horizons},
+        mid_markout_bps={
+            f"{h}s": metric_stats(orders, f"mid_markout_{h}s_bps")
+            for h in horizons
+            if f"mid_markout_{h}s_bps" in orders.columns
         },
         flagged_orders=flagged,
         flagged_fraction=flagged_fraction,
@@ -120,6 +130,7 @@ def summarize_by(orders: pl.DataFrame, by: str | list[str]) -> pl.DataFrame:
     """Per-group statistics (e.g. by ``symbol``, ``strategy`` or ``side``)."""
     aggregations = [
         pl.len().alias("orders"),
+        pl.col("arrival_cost_bps").count().alias("orders_with_arrival_cost"),
         pl.col("executed_notional").sum().alias("executed_notional"),
         pl.col("completion_ratio").mean().alias("mean_completion_ratio"),
         pl.col("arrival_cost_bps").median().alias("median_arrival_cost_bps"),

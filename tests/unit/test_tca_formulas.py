@@ -41,8 +41,8 @@ def evaluate(expr: pl.Expr) -> float:
 
 
 def test_side_sign_expression() -> None:
-    signs = pl.select(side_sign(pl.Series(["BUY", "SELL"]))).to_series().to_list()
-    assert signs == [1, -1]
+    signs = pl.select(side_sign(pl.Series(["BUY", "SELL", "HOLD", None]))).to_series().to_list()
+    assert signs == [1, -1, None, None]
 
 
 @pytest.mark.parametrize(
@@ -190,7 +190,30 @@ def test_buy_markouts_use_prevailing_future_mid(result: TcaResult) -> None:
     }
     for horizon, value in expected.items():
         assert row[f"markout_{horizon}s_bps"] == pytest.approx(value, rel=1e-6), horizon
-        assert row[f"markout_{horizon}s_missing_fills"] == 0
+        assert row[f"markout_{horizon}s_unavailable_fills"] == 0
+
+
+def test_buy_mid_markout_isolates_the_subsequent_price_move(result: TcaResult) -> None:
+    row = order_row(result, "B1")
+    # 10 s: B1-1 mid 100.02 -> 100.08: +600 / 100.02; B1-2 mid 100.08 -> 100.08: 0.
+    assert row["mid_markout_10s_bps"] == pytest.approx(100 * (600 / 100.02) / 300, rel=1e-6)
+    # 60 s: B1-1 100.02 -> 100.18 (+1600/100.02); B1-2 100.08 -> 100.20 (+1200/100.08).
+    expected = (100 * (1600 / 100.02) + 200 * (1200 / 100.08)) / 300
+    assert row["mid_markout_60s_bps"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_fill_markout_includes_the_half_spread_paid_but_mid_markout_does_not() -> None:
+    # Flat market 9.99 / 10.01 (mid 10.00); a BUY lifts the offer at 10.01.
+    quotes = quotes_frame([(s, "SYN", 9.99, 10.01, 100, 100) for s in range(0, 400, 10)])
+    orders = orders_frame([("O1", "SYN", "BUY", 100, 1.0, None, None)])
+    fills = fills_frame([("F1", "O1", 5.0, 100, 10.01)])
+    row = run_tca(quotes, trades_frame([]), orders, fills).orders.row(0, named=True)
+    # Fill markout: (10.00 - 10.01) / 10.01 * 1e4 = -100 / 10.01 at every horizon.
+    for horizon in (10, 30, 60, 300):
+        assert row[f"markout_{horizon}s_bps"] == pytest.approx(-100 / 10.01, rel=1e-9)
+        assert row[f"mid_markout_{horizon}s_bps"] == 0.0
+    # ... which is exactly minus half the effective spread (20 bps).
+    assert row["effective_spread_bps"] == pytest.approx(20.0, rel=1e-9)
 
 
 # --- the same market for a SELL: direction symmetry ---------------------------

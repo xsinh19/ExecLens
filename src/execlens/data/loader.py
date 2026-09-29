@@ -46,6 +46,7 @@ def write_dataset(dataset: ExecutionDataset, directory: Path) -> Path:
     (directory / METADATA_FILE).write_text(
         json.dumps(dataset.metadata, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     return directory
 

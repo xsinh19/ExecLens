@@ -40,6 +40,8 @@ def test_metric_stats_by_hand() -> None:
     assert stats.mean == pytest.approx(22.0)
     # Linear interpolation: position 0.95 * (5 - 1) = 3.8 -> 4 + 0.8 * (100 - 4) = 80.8.
     assert stats.p95 == pytest.approx(80.8)
+    # position 0.05 * 4 = 0.2 -> 1 + 0.2 * (2 - 1) = 1.2
+    assert stats.p5 == pytest.approx(1.2)
 
 
 def test_metric_stats_with_no_data() -> None:

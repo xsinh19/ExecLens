@@ -32,7 +32,7 @@ def test_order_without_fills() -> None:
     assert row["effective_spread_bps"] is None
     assert row["order_duration_seconds"] is None
     assert row["markout_10s_bps"] is None
-    assert row["markout_10s_missing_fills"] == 0
+    assert row["markout_10s_unavailable_fills"] == 0
     # The benchmark interval [5, 35] still exists, so market volume is known.
     assert row["market_volume"] == 400
     assert row["participation_rate"] == 0.0
@@ -54,6 +54,31 @@ def test_without_horizon_the_interval_ends_at_the_last_fill() -> None:
     # Interval [5, 12] contains only the t10 trade.
     assert row["market_volume"] == 100
     assert row["market_vwap"] == pytest.approx(10.00)
+
+
+def test_fills_after_the_horizon_extend_the_benchmark_interval() -> None:
+    # Horizon ends at t=13 but the order kept filling until t=25, so the
+    # interval becomes [5, 25] and covers both trades (t10 and t20).
+    orders = orders_frame([("O1", "SYN", "BUY", 500, 5.0, 8.0, "TWAP")])
+    fills = fills_frame([("F1", "O1", 6.0, 100, 10.01), ("F2", "O1", 25.0, 100, 10.03)])
+    row = only_order(quotes=QUOTES, trades=TRADES, orders=orders, fills=fills)
+    assert row["benchmark_end"] == row["last_fill_timestamp"]
+    assert row["market_volume"] == 400
+    # (100 * 10.00 + 300 * 10.02) / 400 = 4006 / 400 = 10.015
+    assert row["market_vwap"] == pytest.approx(10.015, rel=1e-12)
+
+
+def test_symbol_without_any_trade_data_has_unknown_volume_not_zero() -> None:
+    quotes = pl.concat([QUOTES, quotes_frame([(0, "NOTAPE", 4.99, 5.01, 100, 100)])])
+    orders = orders_frame(
+        [
+            ("O1", "NOTAPE", "BUY", 100, 5.0, 30.0, None),  # no trade data at all
+            ("O2", "SYN", "BUY", 100, 30.0, 20.0, None),  # trade data, but none in [30, 50]
+        ]
+    )
+    out = run_tca(quotes, TRADES, orders, empty(FILL_SCHEMA)).orders
+    volumes = dict(zip(out["order_id"], out["market_volume"], strict=True))
+    assert volumes == {"O1": None, "O2": 0}
 
 
 def test_empty_inputs_produce_empty_results_with_full_schema() -> None:
@@ -207,10 +232,10 @@ def test_markout_beyond_the_end_of_market_data_is_missing_not_hidden() -> None:
     row = result.orders.row(0, named=True)
     # Mid 10.00 vs 10.01 paid: (10.00 - 10.01) / 10.01 * 1e4 = -100 / 10.01 bps.
     assert row["markout_10s_bps"] == pytest.approx(-100 / 10.01, rel=1e-9)
-    assert row["markout_10s_missing_fills"] == 0
+    assert row["markout_10s_unavailable_fills"] == 0
     # F1 (t75 + 30 = 105) and F2 (t110) are both beyond the data at 30 s.
     assert row["markout_30s_bps"] is None
-    assert row["markout_30s_missing_fills"] == 2
+    assert row["markout_30s_unavailable_fills"] == 2
     assert result.fills["markout_30s_status"].to_list() == ["MISSING", "MISSING"]
 
 

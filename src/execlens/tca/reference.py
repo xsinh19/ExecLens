@@ -57,7 +57,8 @@ def reference_columns(horizons: tuple[int, ...]) -> list[str]:
     return [
         *_BASE_COLUMNS,
         *[f"markout_{h}s_bps" for h in horizons],
-        *[f"markout_{h}s_missing_fills" for h in horizons],
+        *[f"mid_markout_{h}s_bps" for h in horizons],
+        *[f"markout_{h}s_unavailable_fills" for h in horizons],
     ]
 
 
@@ -175,9 +176,11 @@ def reference_tca(
         eff_num = 0.0
         spread_num = 0.0
         markout_num = dict.fromkeys(horizons, 0.0)
-        markout_missing = dict.fromkeys(horizons, 0)
+        mid_markout_num = dict.fromkeys(horizons, 0.0)
+        markout_unavailable = dict.fromkeys(horizons, 0)
         for t, q, p in order_fills:
             f_status, f_bid, f_ask = context(sym, t)
+            mid: float | None = None
             if f_status != "OK" or f_bid is None or f_ask is None:
                 without_quote += 1
             else:
@@ -187,23 +190,26 @@ def reference_tca(
             for h in horizons:
                 fmid = future_mid(sym, t + h * MICROS)
                 if fmid is None:
-                    markout_missing[h] += 1
-                else:
-                    markout_num[h] += sign * (fmid - p) / p * BPS * q
+                    markout_unavailable[h] += 1
+                    continue
+                markout_num[h] += sign * (fmid - p) / p * BPS * q
+                if mid is not None:
+                    mid_markout_num[h] += sign * (fmid - mid) / mid * BPS * q
 
-        # Interval market VWAP over the closed interval [arrival, end].
+        # Interval market VWAP over the closed interval [arrival, end]: the
+        # configured horizon, extended to the last fill if executions ran past it.
+        end: int | None = last_fill
         if horizon is not None:
-            end: int | None = arrival + round(horizon * MICROS)
-        else:
-            end = last_fill
+            horizon_end = arrival + round(horizon * MICROS)
+            end = horizon_end if last_fill is None else max(horizon_end, last_fill)
         volume: int | None = None
         vwap: float | None = None
-        if end is not None:
-            times = t_time.get(sym, [])
+        if end is not None and sym in t_time:  # no trade data at all: volume unknown
+            times = t_time[sym]
             lo = bisect_left(times, arrival)
             hi = bisect_right(times, end)
-            sizes = t_size.get(sym, [])[lo:hi]
-            prices = t_price.get(sym, [])[lo:hi]
+            sizes = t_size[sym][lo:hi]
+            prices = t_price[sym][lo:hi]
             volume = sum(sizes)
             market_notional = sum((p * s for p, s in zip(prices, sizes, strict=True)), 0.0)
             vwap = market_notional / volume if volume > 0 else None
@@ -241,9 +247,12 @@ def reference_tca(
             "avg_contemporaneous_spread_bps": spread_num / executed if complete else None,
         }
         for h in horizons:
-            ok = executed > 0 and markout_missing[h] == 0
+            ok = executed > 0 and markout_unavailable[h] == 0
             record[f"markout_{h}s_bps"] = markout_num[h] / executed if ok else None
-            record[f"markout_{h}s_missing_fills"] = markout_missing[h]
+            record[f"mid_markout_{h}s_bps"] = (
+                mid_markout_num[h] / executed if ok and complete else None
+            )
+            record[f"markout_{h}s_unavailable_fills"] = markout_unavailable[h]
         records.append(record)
 
     integer_columns = {
@@ -251,7 +260,7 @@ def reference_tca(
         "n_fills",
         "n_fills_without_quote",
         "market_volume",
-        *(f"markout_{h}s_missing_fills" for h in horizons),
+        *(f"markout_{h}s_unavailable_fills" for h in horizons),
     }
     schema: dict[str, pl.DataType] = {}
     for column in reference_columns(horizons):
