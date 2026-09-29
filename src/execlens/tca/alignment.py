@@ -98,15 +98,14 @@ def attach_quote_context(
     ).drop("quote_timestamp", *fields)
 
 
-def attach_future_mid(
+def attach_future_mids(
     fills: pl.LazyFrame,
     quotes: pl.LazyFrame,
-    last_quote_by_symbol: pl.LazyFrame,
     *,
-    horizon_seconds: int,
+    horizons_seconds: tuple[int, ...],
     tolerance: timedelta,
 ) -> pl.LazyFrame:
-    """Attach the prevailing mid at ``fill time + horizon`` (intentional future data).
+    """Attach the prevailing mid at ``fill time + h`` for each horizon (intentional future data).
 
     Lookup methodology: the prevailing quote at ``t + h`` is the latest quote
     with ``quote_timestamp <= t + h`` (backward as-of join at the target
@@ -118,45 +117,51 @@ def attach_future_mid(
       otherwise ``STALE``.
 
     Adds ``future_mid_{h}s`` (null unless OK) and ``markout_{h}s_status``.
-    ``fills`` must contain ``symbol`` and ``timestamp``; ``last_quote_by_symbol``
-    maps symbol -> ``last_quote_timestamp``.
+    ``fills`` must contain ``symbol`` and ``timestamp``; ``quotes`` must come
+    from :func:`prepare_quotes`.
     """
-    target = f"_target_{horizon_seconds}s"
     tol_s = tolerance.total_seconds()
-    joined = (
-        fills.with_columns(
-            (pl.col("timestamp") + pl.duration(seconds=horizon_seconds)).alias(target)
+    mids = quotes.select("symbol", "quote_timestamp", "mid")
+    last_quote = quotes.group_by("symbol").agg(
+        pl.col("quote_timestamp").max().alias("_last_quote_timestamp")
+    )
+    # Sort once: t + h preserves the (symbol, t) order, so every per-horizon
+    # as-of join below can reuse it. (Hash joins do not preserve row order,
+    # hence the sort comes after the join.)
+    plan = fills.join(last_quote, on="symbol", how="left").sort("symbol", "timestamp")
+    for h in horizons_seconds:
+        target = f"_target_{h}s"
+        plan = (
+            plan.with_columns((pl.col("timestamp") + pl.duration(seconds=h)).alias(target))
+            .join_asof(
+                mids,
+                left_on=target,
+                right_on="quote_timestamp",
+                by="symbol",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .with_columns(
+                pl.when(
+                    pl.col("_last_quote_timestamp").is_null()
+                    | (pl.col(target) > pl.col("_last_quote_timestamp"))
+                    | pl.col("quote_timestamp").is_null()
+                )
+                .then(pl.lit(ContextStatus.MISSING.value))
+                .when(_age_seconds(pl.col(target), pl.col("quote_timestamp")) > tol_s)
+                .then(pl.lit(ContextStatus.STALE.value))
+                .otherwise(pl.lit(ContextStatus.OK.value))
+                .alias(f"markout_{h}s_status")
+            )
+            .with_columns(
+                pl.when(pl.col(f"markout_{h}s_status") == ContextStatus.OK.value)
+                .then(pl.col("mid"))
+                .otherwise(None)
+                .alias(f"future_mid_{h}s")
+            )
+            .drop(target, "quote_timestamp", "mid")
         )
-        .join(last_quote_by_symbol, on="symbol", how="left")
-        # join_asof needs (symbol, target) order; sort after the hash join,
-        # which does not preserve row order.
-        .sort("symbol", target)
-        .join_asof(
-            quotes.select("symbol", "quote_timestamp", "mid"),
-            left_on=target,
-            right_on="quote_timestamp",
-            by="symbol",
-            strategy="backward",
-            check_sortedness=False,
-        )
-    )
-    beyond_data = pl.col("last_quote_timestamp").is_null() | (
-        pl.col(target) > pl.col("last_quote_timestamp")
-    )
-    status = (
-        pl.when(beyond_data | pl.col("quote_timestamp").is_null())
-        .then(pl.lit(ContextStatus.MISSING.value))
-        .when(_age_seconds(pl.col(target), pl.col("quote_timestamp")) > tol_s)
-        .then(pl.lit(ContextStatus.STALE.value))
-        .otherwise(pl.lit(ContextStatus.OK.value))
-    )
-    return joined.with_columns(
-        pl.when(status == ContextStatus.OK.value)
-        .then(pl.col("mid"))
-        .otherwise(None)
-        .alias(f"future_mid_{horizon_seconds}s"),
-        status.alias(f"markout_{horizon_seconds}s_status"),
-    ).drop(target, "last_quote_timestamp", "quote_timestamp", "mid")
+    return plan.drop("_last_quote_timestamp")
 
 
 def attach_interval_volume(

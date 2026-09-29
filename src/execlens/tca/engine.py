@@ -39,7 +39,7 @@ from execlens.config import DEFAULT_STALE_QUOTE_TOLERANCE_SECONDS
 from execlens.data.validation import validate_tables
 from execlens.tca.alignment import (
     ContextStatus,
-    attach_future_mid,
+    attach_future_mids,
     attach_interval_volume,
     attach_quote_context,
     prepare_quotes,
@@ -178,9 +178,6 @@ def build_fill_plan(
     """Fill-level context, effective spread and markouts (lazy plan)."""
     tol = config.tolerance
     quotes = quote_context.lazy()
-    last_quote = quotes.group_by("symbol").agg(
-        pl.col("quote_timestamp").max().alias("last_quote_timestamp")
-    )
     parents = _with_side_sign(orders).select("order_id", "symbol", "side", "side_sign")
     plan = fills.join(parents, on="order_id", how="inner").with_columns(
         (pl.col("price") * pl.col("quantity")).alias("notional")
@@ -192,18 +189,22 @@ def build_fill_plan(
             "effective_spread_bps"
         )
     )
-    for h in config.markout_horizons_seconds:
-        future_mid = pl.col(f"future_mid_{h}s")
-        plan = attach_future_mid(
-            plan, quotes, last_quote, horizon_seconds=h, tolerance=tol
-        ).with_columns(
-            markout_bps(pl.col("side_sign"), pl.col("price"), future_mid).alias(
+    horizons = config.markout_horizons_seconds
+    plan = attach_future_mids(plan, quotes, horizons_seconds=horizons, tolerance=tol)
+    plan = plan.with_columns(
+        *[
+            markout_bps(pl.col("side_sign"), pl.col("price"), pl.col(f"future_mid_{h}s")).alias(
                 f"markout_{h}s_bps"
-            ),
-            markout_bps(pl.col("side_sign"), pl.col("fill_mid"), future_mid).alias(
+            )
+            for h in horizons
+        ],
+        *[
+            markout_bps(pl.col("side_sign"), pl.col("fill_mid"), pl.col(f"future_mid_{h}s")).alias(
                 f"mid_markout_{h}s_bps"
-            ),
-        )
+            )
+            for h in horizons
+        ],
+    )
     return plan.select(fill_columns(config.markout_horizons_seconds)).sort(
         "order_id", "timestamp", "fill_id"
     )

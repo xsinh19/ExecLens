@@ -6,6 +6,7 @@ formula is implemented here.
 
 from __future__ import annotations
 
+import json
 import platform
 from pathlib import Path
 from typing import Annotated
@@ -15,8 +16,11 @@ from rich.console import Console
 from rich.table import Table
 
 from execlens import __version__
-from execlens.data.loader import write_dataset
+from execlens.data.loader import dataset_exists, write_dataset
 from execlens.services.datasets import PRESETS, generate_dataset, preset
+
+DEFAULT_BENCHMARK_DATA = Path("data/generated/benchmark")
+BENCHMARK_DOC = Path("docs/BENCHMARKS.md")
 
 app = typer.Typer(
     name="execlens",
@@ -90,6 +94,69 @@ def generate(
         f"symbols={', '.join(i.symbol for i in spec.market.universe)}"
     )
     console.print("[dim]Synthetic data only: not real market data; fills are simulated.[/dim]")
+
+
+@app.command()
+def benchmark(
+    data: Annotated[
+        Path,
+        typer.Option(help="Benchmark dataset (generated with the benchmark preset if absent)."),
+    ] = DEFAULT_BENCHMARK_DATA,
+    reference_repeats: Annotated[int, typer.Option(min=1, help="Timed reference runs.")] = 5,
+    optimized_repeats: Annotated[int, typer.Option(min=1, help="Timed Polars runs.")] = 5,
+    output: Annotated[Path, typer.Option(help="Machine-readable results file.")] = Path(
+        "benchmarks/results.json"
+    ),
+    api: Annotated[bool, typer.Option(help="Also measure local API latency.")] = True,
+    update_docs: Annotated[
+        bool, typer.Option(help=f"Rewrite the results block in {BENCHMARK_DOC}.")
+    ] = True,
+    smoke: Annotated[
+        bool,
+        typer.Option(help="Quick run on the small sample dataset; prints results, writes nothing."),
+    ] = False,
+) -> None:
+    """Benchmark the loop-based reference TCA against the vectorised Polars engine."""
+    from execlens.benchmarking import (
+        BenchmarkError,
+        render_markdown,
+        run_tca_benchmark,
+        update_markdown_block,
+        write_results,
+    )
+
+    if smoke:
+        data, reference_repeats, optimized_repeats = Path("data/sample"), 1, 1
+    elif not dataset_exists(data):
+        console.print(f"Generating the benchmark dataset in {data} (one-off)...")
+        write_dataset(generate_dataset(preset("benchmark")), data)
+    try:
+        tca_results = run_tca_benchmark(
+            data,
+            reference_repeats=reference_repeats,
+            optimized_repeats=optimized_repeats,
+            enforce_scale=not smoke,
+            log=console.print,
+        )
+        results = {"tca": tca_results}
+        if api:
+            from execlens.benchmarking import run_api_benchmark
+
+            results["api"] = run_api_benchmark(data, log=console.print)
+    except BenchmarkError as exc:
+        console.print(f"[red]Benchmark aborted:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if smoke:
+        console.print(render_markdown(results))
+        return
+    for section, payload in results.items():
+        write_results(payload, output, section)
+    console.print(f"Results written to {output}")
+    if update_docs and BENCHMARK_DOC.is_file():
+        stored = json.loads(output.read_text(encoding="utf-8"))
+        update_markdown_block(BENCHMARK_DOC, render_markdown(stored))
+        console.print(f"Updated the results section of {BENCHMARK_DOC}")
 
 
 if __name__ == "__main__":

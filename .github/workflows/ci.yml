@@ -41,3 +41,9 @@ jobs:
 
       - name: Core coverage targets (tca, simulation, diagnostics >= 85%)
         run: uv run python scripts/check_coverage.py coverage.json
+
+      # Small smoke benchmark on the committed sample: checks that the reference and
+      # the Polars engine still agree and the harness runs. The full >1M-row benchmark
+      # is run locally (execlens benchmark), not on every commit.
+      - name: Smoke benchmark
+        run: uv run execlens benchmark --smoke --no-api

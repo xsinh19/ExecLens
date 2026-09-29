@@ -1,0 +1,103 @@
+{
+  "tca": {
+    "generated_at": "2026-09-29T21:19:40+00:00",
+    "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "python": "3.12.14",
+      "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
+      "logical_cpus": 16,
+      "memory_gb": 15.6,
+      "power": {
+        "on_battery": false,
+        "battery_percent": 65,
+        "power_scheme": "Silent"
+      },
+      "polars": "1.44.2",
+      "polars_threads": 16,
+      "numpy": "2.5.3",
+      "execlens": "0.1.0"
+    },
+    "dataset": {
+      "path": "data/generated/benchmark",
+      "quotes": 1053935,
+      "trades": 493401,
+      "market_observations": 1547336,
+      "orders": 5400,
+      "fills": 125714,
+      "symbols": 6,
+      "metadata_seed": 1
+    },
+    "validation": {
+      "equivalent": true,
+      "rtol": 1e-09,
+      "atol": 1e-06,
+      "rule": "integer/string columns exact; floats |a-b| <= atol + rtol*|b|; same nulls"
+    },
+    "workloads": {
+      "core_in_memory": {
+        "description": "Order-level TCA from in-memory Polars frames (no I/O).",
+        "reference": {
+          "runs_s": [
+            7.815,
+            9.0445,
+            8.1868,
+            7.8595,
+            7.4579
+          ],
+          "median_s": 7.8595,
+          "min_s": 7.4579,
+          "max_s": 9.0445,
+          "repetitions": 5,
+          "peak_rss_mb": 268.8
+        },
+        "optimized": {
+          "runs_s": [
+            0.8438,
+            0.7973,
+            0.6873,
+            0.6009,
+            0.6491
+          ],
+          "median_s": 0.6873,
+          "min_s": 0.6009,
+          "max_s": 0.8438,
+          "repetitions": 5,
+          "peak_rss_mb": 270.0
+        },
+        "speedup_median": 11.44
+      },
+      "end_to_end_parquet": {
+        "description": "Order-level TCA starting from Parquet files on disk (includes reading).",
+        "reference": {
+          "runs_s": [
+            5.2992,
+            4.3291,
+            4.4591,
+            4.3591,
+            4.4841
+          ],
+          "median_s": 4.4591,
+          "min_s": 4.3291,
+          "max_s": 5.2992,
+          "repetitions": 5,
+          "peak_rss_mb": 243.9
+        },
+        "optimized": {
+          "runs_s": [
+            0.3737,
+            0.3581,
+            0.3639,
+            0.3579,
+            0.367
+          ],
+          "median_s": 0.3639,
+          "min_s": 0.3579,
+          "max_s": 0.3737,
+          "repetitions": 5,
+          "peak_rss_mb": 152.9
+        },
+        "speedup_median": 12.25
+      }
+    }
+  }
+}

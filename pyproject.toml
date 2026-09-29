@@ -47,6 +47,7 @@ dev = [
     "pytest>=9.1",
     "pytest-cov>=7.1",
     "ruff>=0.16",
+    "types-psutil",
 ]
 
 [project.scripts]
