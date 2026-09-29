@@ -57,17 +57,36 @@ def test_benchmark_aborts_when_implementations_disagree(monkeypatch: pytest.Monk
         bench.run_tca_benchmark(SAMPLE_DIR, enforce_scale=False, log=lambda _: None)
 
 
-def test_interleaved_measurement_alternates_runs() -> None:
-    calls: list[str] = []
-    ref, opt = bench.measure_interleaved(
-        lambda: calls.append("ref"), lambda: calls.append("opt"), 2, 3
+def test_single_thread_engine_is_measured(results: dict[str, Any]) -> None:
+    core = results["workloads"]["core_in_memory"]
+    single = core["optimized_single_thread"]
+    assert single["threads"] == 1
+    assert single["repetitions"] == 2
+    assert core["speedup_single_thread_median"] > 0
+    assert "optimized_single_thread" not in results["workloads"]["end_to_end_parquet"]
+
+
+def test_changes_in_machine_speed_are_noted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Per repetition the order is: core ref, core opt, e2e ref, e2e opt.
+    # Make end-to-end (which does strictly more work) look faster than core.
+    times = iter([1.0, 0.1, 0.5, 0.05] * 2)
+    monkeypatch.setattr(bench, "_elapsed", lambda fn: next(times))
+    results = bench.run_tca_benchmark(
+        SAMPLE_DIR,
+        reference_repeats=2,
+        optimized_repeats=2,
+        enforce_scale=False,
+        single_thread=False,
+        log=lambda _: None,
     )
-    # Two timed pairs, a trailing optimized run, then one untimed memory run each.
-    assert calls == ["ref", "opt", "ref", "opt", "opt", "ref", "opt"]
-    assert len(ref.runs_s) == 2
-    assert len(opt.runs_s) == 3
+    assert len(results["notes"]) == 2
+    assert "compare ratios, not absolutes" in results["notes"][0]
+    assert "> Note:" in bench.render_markdown({"tca": results})
+
+
+def test_repeats_must_be_positive() -> None:
     with pytest.raises(ValueError, match="repeats"):
-        bench.measure_interleaved(lambda: None, lambda: None, 0, 1)
+        bench.run_tca_benchmark(SAMPLE_DIR, reference_repeats=0, enforce_scale=False)
 
 
 def test_results_file_keeps_other_sections(tmp_path: Path) -> None:

@@ -27,10 +27,11 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -119,31 +120,6 @@ def peak_memory_mb(fn: Callable[[], object]) -> float | None:
     return rss.peak_mb
 
 
-def measure_interleaved(
-    reference: Callable[[], object],
-    optimized: Callable[[], object],
-    reference_repeats: int,
-    optimized_repeats: int,
-) -> tuple[Measurement, Measurement]:
-    """Alternate timed runs of both implementations, then measure memory once each.
-
-    Callers run their own warm-up first.
-    """
-    if reference_repeats < 1 or optimized_repeats < 1:
-        raise ValueError("repeats must be >= 1")
-    ref_runs: list[float] = []
-    opt_runs: list[float] = []
-    for i in range(max(reference_repeats, optimized_repeats)):
-        if i < reference_repeats:
-            ref_runs.append(_elapsed(reference))
-        if i < optimized_repeats:
-            opt_runs.append(_elapsed(optimized))
-    return (
-        Measurement(ref_runs, peak_memory_mb(reference)),
-        Measurement(opt_runs, peak_memory_mb(optimized)),
-    )
-
-
 def power_state() -> dict[str, Any] | None:
     """Battery / AC status and (on Windows) the active power scheme, if known."""
     state: dict[str, Any] = {}
@@ -226,6 +202,84 @@ def _read_eager(
     )
 
 
+class _SingleThreadWorker:
+    """A child process running the engine with ``POLARS_MAX_THREADS=1``.
+
+    Polars fixes its thread pool at import, so single-threaded timings need a
+    separate process. The worker loads the dataset once, runs one warm-up
+    (whose output the parent checks against the reference), then times one
+    engine run per ``run`` request so its runs can be interleaved with the
+    parent's.
+    """
+
+    def __init__(self, dataset_dir: Path, config: TcaConfig, output: Path) -> None:
+        config_json = json.dumps(asdict(config))
+        self._process: subprocess.Popen[str] = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "execlens.benchmarking",
+                str(dataset_dir),
+                config_json,
+                str(output),
+            ],
+            env=os.environ | {"POLARS_MAX_THREADS": "1"},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        if self._process.stdin is None or self._process.stdout is None:  # pragma: no cover
+            raise BenchmarkError("could not open pipes to the single-thread worker")
+        self._stdin, self._stdout = self._process.stdin, self._process.stdout
+        ready = self._stdout.readline().strip()
+        if not ready.startswith("ready"):
+            self._process.kill()
+            raise BenchmarkError(f"single-thread worker failed to start: {ready!r}")
+        self.threads = int(ready.split()[1])
+
+    def run(self) -> float:
+        self._stdin.write("run\n")
+        self._stdin.flush()
+        return float(self._stdout.readline())
+
+    def close(self) -> None:
+        self._stdin.close()
+        try:
+            self._process.wait(timeout=60)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            self._process.kill()
+            self._process.wait()
+        self._stdout.close()
+
+    def __enter__(self) -> _SingleThreadWorker:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _single_thread_worker_main(dataset_dir: str, config_json: str, output: str) -> None:
+    """Entry point of :class:`_SingleThreadWorker` (``python -m execlens.benchmarking``)."""
+    raw = json.loads(config_json)
+    config = TcaConfig(
+        stale_quote_tolerance_seconds=raw["stale_quote_tolerance_seconds"],
+        markout_horizons_seconds=tuple(raw["markout_horizons_seconds"]),
+    )
+    dataset = read_dataset(Path(dataset_dir), validate=False)  # validated by the parent
+
+    def once() -> pl.DataFrame:
+        return run_tca(
+            dataset.quotes, dataset.trades, dataset.orders, dataset.fills, config, validate=False
+        ).orders
+
+    once().write_parquet(output)  # warm-up; the parent checks it against the reference
+    print("ready", pl.thread_pool_size(), flush=True)
+    for line in sys.stdin:
+        if line.strip() != "run":
+            break
+        print(_elapsed(once), flush=True)
+
+
 def run_tca_benchmark(
     dataset_dir: Path,
     *,
@@ -233,6 +287,7 @@ def run_tca_benchmark(
     optimized_repeats: int = 7,
     config: TcaConfig | None = None,
     enforce_scale: bool = True,
+    single_thread: bool = True,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """Benchmark the loop reference against the vectorised engine.
@@ -243,6 +298,11 @@ def run_tca_benchmark(
     * ``end_to_end_parquet`` - both start from the Parquet files on disk: the
       reference reads every file eagerly, the engine scans lazily so Polars
       can skip unused columns.
+
+    Timed runs are interleaved across implementations *and* workloads so
+    changes in machine state affect everything alike. For ``core_in_memory``
+    the engine is also timed single-threaded (``POLARS_MAX_THREADS=1``) to
+    separate the gain from vectorisation from the gain from parallelism.
     """
     config = config or TcaConfig()
     dataset = read_dataset(dataset_dir)  # validated once, outside any timing
@@ -284,24 +344,76 @@ def run_tca_benchmark(
         ),
     }
 
-    results: dict[str, Any] = {}
-    for name, (description, reference, optimized) in workloads.items():
+    if reference_repeats < 1 or optimized_repeats < 1:
+        raise ValueError("repeats must be >= 1")
+    reference_outputs: dict[str, pl.DataFrame] = {}
+    for name, (_, reference, optimized) in workloads.items():
         log(f"[{name}] warm-up + equivalence check")
-        problems = compare_to_reference(optimized(), reference())
+        reference_outputs[name] = reference()
+        problems = compare_to_reference(optimized(), reference_outputs[name])
         if problems:
             raise BenchmarkError(f"{name}: implementations disagree: {problems}")
-        log(f"[{name}] timing: reference x{reference_repeats}, optimized x{optimized_repeats}")
-        ref, opt = measure_interleaved(reference, optimized, reference_repeats, optimized_repeats)
+
+    worker: _SingleThreadWorker | None = None
+    single_thread_runs: list[float] = []
+    reference_output = reference_outputs["core_in_memory"]
+    with tempfile.TemporaryDirectory() as scratch:
+        if single_thread:
+            log("[core_in_memory] starting single-thread (POLARS_MAX_THREADS=1) worker")
+            worker = _SingleThreadWorker(dataset_dir, config, Path(scratch) / "st.parquet")
+            problems = compare_to_reference(
+                pl.read_parquet(Path(scratch) / "st.parquet"), reference_output
+            )
+            if problems:
+                worker.close()
+                raise BenchmarkError(f"single-thread engine disagrees: {problems}")
+        try:
+            log(
+                f"timing (interleaved across workloads): reference x{reference_repeats}, "
+                f"optimized x{optimized_repeats}"
+            )
+            runs: dict[str, tuple[list[float], list[float]]] = {n: ([], []) for n in workloads}
+            for i in range(max(reference_repeats, optimized_repeats)):
+                for name, (_, reference, optimized) in workloads.items():
+                    if i < reference_repeats:
+                        runs[name][0].append(_elapsed(reference))
+                    if i < optimized_repeats:
+                        runs[name][1].append(_elapsed(optimized))
+                        if name == "core_in_memory" and worker is not None:
+                            single_thread_runs.append(worker.run())
+        finally:
+            if worker is not None:
+                worker.close()
+
+    results: dict[str, Any] = {}
+    for name, (description, reference, optimized) in workloads.items():
+        ref = Measurement(runs[name][0], peak_memory_mb(reference))
+        opt = Measurement(runs[name][1], peak_memory_mb(optimized))
         results[name] = {
             "description": description,
             "reference": ref.as_dict(),
             "optimized": opt.as_dict(),
             "speedup_median": round(ref.median_s / opt.median_s, 3),
         }
+        if name == "core_in_memory" and single_thread_runs:
+            st = Measurement(single_thread_runs)
+            results[name]["optimized_single_thread"] = st.as_dict() | {"threads": 1}
+            results[name]["speedup_single_thread_median"] = round(ref.median_s / st.median_s, 3)
         log(
             f"[{name}] reference {ref.median_s:.3f}s | optimized {opt.median_s:.3f}s | "
             f"speedup {ref.median_s / opt.median_s:.1f}x"
         )
+
+    notes = []
+    core, e2e = results["core_in_memory"], results["end_to_end_parquet"]
+    for side in ("reference", "optimized"):
+        if e2e[side]["median_s"] < 0.9 * core[side]["median_s"]:
+            notes.append(
+                f"{side}: end-to-end (which includes reading Parquet) was faster than in-memory; "
+                "the machine's speed changed during the run, so compare ratios, not absolutes."
+            )
+    for note in notes:
+        log(f"[warning] {note}")
 
     return {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -314,6 +426,7 @@ def run_tca_benchmark(
             "rule": "integer/string columns exact; floats |a-b| <= atol + rtol*|b|; same nulls",
         },
         "workloads": results,
+        "notes": notes,
     }
 
 
@@ -494,15 +607,30 @@ def render_markdown(results: dict[str, Any]) -> str:
         core = tca["workloads"].get("core_in_memory")
         if core:
             ref_s, opt_s = core["reference"]["median_s"], core["optimized"]["median_s"]
+            bars = [
+                f"Python reference      {_bar(ref_s, ref_s)} {ref_s:.2f} s",
+                f"Polars, all threads   {_bar(opt_s, ref_s)} {opt_s:.2f} s",
+            ]
+            single = core.get("optimized_single_thread")
+            if single:
+                st_s = single["median_s"]
+                bars.append(f"Polars, 1 thread      {_bar(st_s, ref_s)} {st_s:.2f} s")
             lines += [
                 "",
                 "```text",
                 "Core TCA (in memory), median wall-clock time",
-                f"Python reference  {_bar(ref_s, ref_s)} {ref_s:.2f} s",
-                f"Polars engine     {_bar(opt_s, ref_s)} {opt_s:.2f} s",
-                f"Measured speedup: {core['speedup_median']:.1f}x",
+                *bars,
+                f"Measured speedup: {core['speedup_median']:.1f}x with "
+                f"{env['polars_threads']} threads"
+                + (
+                    f", {core['speedup_single_thread_median']:.1f}x single-threaded"
+                    if single
+                    else ""
+                ),
                 "```",
             ]
+        for note in tca.get("notes", []):
+            lines += ["", f"> Note: {note}"]
     api = results.get("api")
     if api:
         lines += [
@@ -524,9 +652,56 @@ def render_markdown(results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_readme_summary(results: dict[str, Any]) -> str:
+    """The compact benchmark visual for README.md (numbers only from ``results``)."""
+    tca = results.get("tca")
+    if not tca or "core_in_memory" not in tca["workloads"]:
+        return "_Run `execlens benchmark` to measure._"
+    core, data = tca["workloads"]["core_in_memory"], tca["dataset"]
+    ref_s, opt_s = core["reference"]["median_s"], core["optimized"]["median_s"]
+    single = core.get("optimized_single_thread")
+    threads = tca["environment"]["polars_threads"]
+    lines = [
+        "```text",
+        "TCA processing benchmark (median of interleaved runs, outputs verified equal)",
+        "",
+        f"Python baseline    {_bar(ref_s, ref_s)} {ref_s:.2f} s",
+        f"Polars             {_bar(opt_s, ref_s)} {opt_s:.2f} s",
+    ]
+    if single:
+        lines.append(
+            f"Polars, 1 thread   {_bar(single['median_s'], ref_s)} {single['median_s']:.2f} s"
+        )
+    lines += [
+        "",
+        f"Measured speedup: {core['speedup_median']:.1f}x ({threads} threads)"
+        + (f", {core['speedup_single_thread_median']:.1f}x single-threaded" if single else ""),
+        f"Dataset: {data['fills']:,} fills / {data['market_observations']:,} market rows "
+        f"({data['quotes']:,} quotes + {data['trades']:,} trades)",
+        "```",
+    ]
+    api = results.get("api")
+    if api:
+        by_endpoint = {row["endpoint"]: row for row in api["endpoints"]}
+        health = by_endpoint.get("/health")
+        tca_row = by_endpoint.get("/api/v1/orders/{order_id}/tca")
+        if health and tca_row:
+            lines += [
+                "",
+                f"Local API p95 latency with {api['orders']:,} orders loaded: "
+                f"`/health` {health['p95_ms']:.1f} ms, "
+                f"`/orders/{{id}}/tca` {tca_row['p95_ms']:.1f} ms.",
+            ]
+    return "\n".join(lines)
+
+
 def update_markdown_block(document: Path, block: str) -> None:
     """Replace the text between the results markers in ``document``."""
     text = document.read_text(encoding="utf-8")
     start, end = text.index(RESULTS_START), text.index(RESULTS_END)
     updated = text[: start + len(RESULTS_START)] + "\n" + block + "\n" + text[end:]
     document.write_text(updated, encoding="utf-8", newline="\n")
+
+
+if __name__ == "__main__":
+    _single_thread_worker_main(*sys.argv[1:4])

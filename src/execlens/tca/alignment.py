@@ -73,7 +73,7 @@ def attach_quote_context(
     the price columns are null unless the status is ``OK``.
     """
     tol_s = tolerance.total_seconds()
-    joined = events.sort("symbol", event_time).join_asof(
+    joined = events.sort("symbol", event_time, maintain_order=True).join_asof(
         quotes,
         left_on=event_time,
         right_on="quote_timestamp",
@@ -129,7 +129,9 @@ def attach_future_mids(
     # Sort once: t + h preserves the (symbol, t) order, so every per-horizon
     # as-of join below can reuse it. (Hash joins do not preserve row order,
     # hence the sort comes after the join.)
-    plan = fills.join(last_quote, on="symbol", how="left").sort("symbol", "timestamp")
+    plan = fills.join(last_quote, on="symbol", how="left", maintain_order="left").sort(
+        "symbol", "timestamp", maintain_order=True
+    )
     for h in horizons_seconds:
         target = f"_target_{h}s"
         plan = (
@@ -195,7 +197,7 @@ def attach_interval_volumes(
         )
     )
     traded_symbols = trades.select("symbol").unique().with_columns(pl.lit(True).alias("_has_tape"))
-    plan = frame.join(traded_symbols, on="symbol", how="left")
+    plan = frame.join(traded_symbols, on="symbol", how="left", maintain_order="left")
     for name, (start, end) in intervals.items():
         end_key = pl.coalesce(pl.col(end), pl.col(start)).alias("_end_key")
         plan = (

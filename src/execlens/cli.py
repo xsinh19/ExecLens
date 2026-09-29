@@ -38,6 +38,7 @@ from execlens.tca.aggregation import summarize_by
 DEFAULT_BENCHMARK_DATA = Path("data/generated/benchmark")
 DEFAULT_DEMO_DATA = Path("data/generated/demo")
 BENCHMARK_DOC = Path("docs/BENCHMARKS.md")
+README = Path("README.md")
 DASHBOARD_SCRIPT = Path(__file__).resolve().parent / "dashboard" / "app.py"
 DISCLAIMER = "Synthetic data only: not real market data; all fills are simulated."
 
@@ -398,7 +399,8 @@ def benchmark(
     ),
     api: Annotated[bool, typer.Option(help="Also measure local API latency.")] = True,
     update_docs: Annotated[
-        bool, typer.Option(help=f"Rewrite the results block in {BENCHMARK_DOC}.")
+        bool,
+        typer.Option(help=f"Rewrite the generated results blocks in {BENCHMARK_DOC} and README."),
     ] = True,
     smoke: Annotated[
         bool,
@@ -409,6 +411,7 @@ def benchmark(
     from execlens.benchmarking import (
         BenchmarkError,
         render_markdown,
+        render_readme_summary,
         run_api_benchmark,
         run_tca_benchmark,
         update_markdown_block,
@@ -442,10 +445,15 @@ def benchmark(
     for section, payload in results.items():
         write_results(payload, output, section)
     console.print(f"Results written to {output}")
-    if update_docs and BENCHMARK_DOC.is_file():
+    if update_docs:
         stored = json.loads(output.read_text(encoding="utf-8"))
-        update_markdown_block(BENCHMARK_DOC, render_markdown(stored))
-        console.print(f"Updated the results section of {BENCHMARK_DOC}")
+        for document, block in (
+            (BENCHMARK_DOC, render_markdown(stored)),
+            (README, render_readme_summary(stored)),
+        ):
+            if document.is_file():
+                update_markdown_block(document, block)
+                console.print(f"Updated the benchmark section of {document}")
 
 
 if __name__ == "__main__":

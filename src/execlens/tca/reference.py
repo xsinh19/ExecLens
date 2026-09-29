@@ -2,16 +2,18 @@
 
 This module recomputes the order-level metrics of :mod:`execlens.tca.engine`
 one order at a time with idiomatic Python: dictionaries of per-symbol lists,
-``bisect`` for as-of lookups and slice sums for interval VWAP. It serves
-three purposes:
+``bisect`` for as-of lookups and per-symbol prefix sums for interval volume
+and VWAP. It serves three purposes:
 
 1. a readable, loop-by-loop statement of every metric's semantics;
 2. an independent oracle - tests and the benchmark assert that the
    vectorised engine agrees with it within a documented tolerance;
 3. the baseline of the performance benchmark.
 
-It is intentionally *not* vectorised, but it is not crippled either: lookups
-are logarithmic (binary search), not linear scans.
+It is intentionally *not* vectorised, but it is not crippled either: it uses
+the same algorithmic ideas as the engine (binary-search lookups, prefix sums
+so each interval costs O(log n)), so the benchmark measures implementation
+technique, not a better algorithm.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
+from itertools import accumulate
 from typing import Any
 
 import polars as pl
@@ -110,14 +113,16 @@ def reference_tca(
         strict=True,
     ):
         trade_rows[sym].append((t, price, size))
+    # Per-symbol trade times plus prefix sums of size and price * size:
+    # the volume in trades[lo:hi] is cum_size[hi] - cum_size[lo].
     t_time: dict[str, list[int]] = {}
-    t_price: dict[str, list[float]] = {}
-    t_size: dict[str, list[int]] = {}
+    cum_size: dict[str, list[int]] = {}
+    cum_notional: dict[str, list[float]] = {}
     for sym, tape in trade_rows.items():
         tape.sort(key=lambda row: row[0])
         t_time[sym] = [r[0] for r in tape]
-        t_price[sym] = [r[1] for r in tape]
-        t_size[sym] = [r[2] for r in tape]
+        cum_size[sym] = list(accumulate((r[2] for r in tape), initial=0))
+        cum_notional[sym] = list(accumulate((r[1] * r[2] for r in tape), initial=0.0))
 
     fills_by_order: dict[str, list[tuple[int, int, float]]] = defaultdict(list)
     for oid, t, qty, price in zip(
@@ -207,13 +212,10 @@ def reference_tca(
         volume: int | None = None
         vwap: float | None = None
         if end is not None and sym in t_time:  # no trade data at all: volume unknown
-            times = t_time[sym]
-            lo = bisect_left(times, arrival)
-            hi = bisect_right(times, end)
-            sizes = t_size[sym][lo:hi]
-            prices = t_price[sym][lo:hi]
-            volume = sum(sizes)
-            market_notional = sum((p * s for p, s in zip(prices, sizes, strict=True)), 0.0)
+            lo = bisect_left(t_time[sym], arrival)  # first trade >= arrival
+            hi = bisect_right(t_time[sym], end)  # first trade > end
+            volume = cum_size[sym][hi] - cum_size[sym][lo]
+            market_notional = cum_notional[sym][hi] - cum_notional[sym][lo]
             vwap = market_notional / volume if volume > 0 else None
 
         # Volume while the order was actually trading: [arrival, last fill].
@@ -221,7 +223,7 @@ def reference_tca(
         if last_fill is not None and sym in t_time:
             lo = bisect_left(t_time[sym], arrival)
             hi = bisect_right(t_time[sym], last_fill)
-            window_volume = sum(t_size[sym][lo:hi])
+            window_volume = cum_size[sym][hi] - cum_size[sym][lo]
 
         complete = executed > 0 and without_quote == 0
         record: dict[str, Any] = {

@@ -181,7 +181,7 @@ def build_fill_plan(
     tol = config.tolerance
     quotes = quote_context.lazy()
     parents = _with_side_sign(orders).select("order_id", "symbol", "side", "side_sign")
-    plan = fills.join(parents, on="order_id", how="inner").with_columns(
+    plan = fills.join(parents, on="order_id", how="inner", maintain_order="left").with_columns(
         (pl.col("price") * pl.col("quantity")).alias("notional")
     )
     plan = attach_quote_context(
@@ -207,8 +207,11 @@ def build_fill_plan(
             for h in horizons
         ],
     )
-    return plan.select(fill_columns(config.markout_horizons_seconds)).sort(
-        "order_id", "timestamp", "fill_id"
+    # Rows come out ordered by (symbol, timestamp): the joins preserve order and
+    # the sorts are stable, so the order is deterministic without a costly
+    # final sort on string ids.
+    return plan.with_columns(pl.col("symbol").cast(pl.String)).select(
+        fill_columns(config.markout_horizons_seconds)
     )
 
 
@@ -325,7 +328,11 @@ def build_order_plan(
             for h in horizons
         ],
     )
-    return plan.select(order_columns(horizons)).sort("arrival_timestamp", "order_id")
+    return (
+        plan.with_columns(pl.col("symbol").cast(pl.String))
+        .select(order_columns(horizons))
+        .sort("arrival_timestamp", "order_id")
+    )
 
 
 def run_tca(
@@ -351,9 +358,16 @@ def run_tca(
             )
         )
         quotes, trades, orders, fills = q, t, o, f
-    quote_context = prepare_quotes(_lazy(quotes)).collect()
-    fill_results = build_fill_plan(quote_context, _lazy(orders), _lazy(fills), config).collect()
+    # Symbols become Categorical inside the pipeline: each symbol string is
+    # hashed once, and every join, partition and sort below works on integer
+    # codes. Outputs are cast back to String.
+    categorical = pl.col("symbol").cast(pl.Categorical)
+    quotes_lf = _lazy(quotes).with_columns(categorical)
+    trades_lf = _lazy(trades).with_columns(categorical)
+    orders_lf = _lazy(orders).with_columns(categorical)
+    quote_context = prepare_quotes(quotes_lf).collect()
+    fill_results = build_fill_plan(quote_context, orders_lf, _lazy(fills), config).collect()
     order_results = build_order_plan(
-        quote_context, _lazy(trades), _lazy(orders), fill_results, config
+        quote_context, trades_lf, orders_lf, fill_results, config
     ).collect()
     return TcaResult(orders=order_results, fills=fill_results, config=config)
