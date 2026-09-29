@@ -26,6 +26,7 @@ from execlens.diagnostics.features import FeatureConfig, compute_features
 from execlens.diagnostics.flags import FlagConfig, flag_counts, flag_orders
 from execlens.tca.aggregation import TcaSummary, summarize_orders
 from execlens.tca.engine import DEFAULT_MARKOUT_HORIZONS, TcaConfig, run_tca
+from execlens.tca.metrics import mid_price
 
 
 class AnalysisConfig(BaseModel):
@@ -84,16 +85,22 @@ class AnalysisResult:
     def market_window(
         self, order_id: str, *, before_seconds: float = 60.0, after_seconds: float = 120.0
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
-        """Quotes and trades around an order, for charts (empty frames if unknown)."""
+        """Quotes (with their mid) and trades around an order, for charts.
+
+        Empty frames for an unknown order. The mid comes from the same formula
+        the TCA engine uses (:func:`execlens.tca.metrics.mid_price`).
+        """
+        with_mid = mid_price(pl.col("bid_price"), pl.col("ask_price")).alias("mid")
         order = self.order(order_id)
         if order is None:
-            return self.dataset.quotes.clear(), self.dataset.trades.clear()
+            return self.dataset.quotes.clear().with_columns(with_mid), self.dataset.trades.clear()
         start = order["arrival_timestamp"] - timedelta(seconds=before_seconds)
         end = (
             order["benchmark_end"] or order["last_fill_timestamp"] or order["arrival_timestamp"]
         ) + timedelta(seconds=after_seconds)
         window = (pl.col("symbol") == order["symbol"]) & pl.col("timestamp").is_between(start, end)
-        return self.dataset.quotes.filter(window), self.dataset.trades.filter(window)
+        quotes = self.dataset.quotes.filter(window).with_columns(with_mid)
+        return quotes, self.dataset.trades.filter(window)
 
 
 def analyze_dataset(

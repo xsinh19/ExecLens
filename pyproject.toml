@@ -94,6 +94,11 @@ strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+# Plotly ships no type information (no py.typed marker).
+module = ["plotly", "plotly.*"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # pytest / coverage
 # ---------------------------------------------------------------------------
