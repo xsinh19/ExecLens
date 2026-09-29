@@ -385,28 +385,37 @@ executions show only exogenous price moves.
 ## 11. Participation rate and quantity / market volume
 
 ```
-participation_rate        = executed_quantity  / market_volume_in_benchmark_interval
-quantity_to_market_volume = requested_quantity / market_volume_in_benchmark_interval
+participation_rate           = executed_quantity  / market_volume in the benchmark interval
+quantity_to_market_volume    = requested_quantity / market_volume in the benchmark interval
+execution_participation_rate = executed_quantity  / market_volume in [arrival, last_fill]
 ```
 
-Both are unavailable when market volume in the interval is zero, unknown or
-the interval is undefined.
+Each is unavailable when its market volume is zero or unknown, or its
+interval is undefined (for example, no fills).
 
-**Example.** An order executes 300 shares while 600 shares trade in its
-interval, so participation = **0.5 (50%)**.
+**Example.** The worked BUY executes 300 shares; 600 shares trade in its
+benchmark interval [5, 65], so participation = **0.5 (50%)**. While it was
+actually trading, [5, 25], only 100 shares printed, so its execution
+participation is **3.0**. That is possible because the synthetic tape does not
+contain the order's own fills (see below).
 
-**Interpretation.** How much of the market the order was over its benchmark
-interval. High participation (flagged above 25% by default) is associated
-with larger market impact and with VWAP benchmarks that partly measure the
-order itself. A POV strategy targets a fixed participation rate.
+**Interpretation.** Benchmark-interval participation measures how much of the
+market the order was over its horizon. It is the same denominator for every
+strategy trading the same order, which suits portfolio-level comparisons, and
+the `HIGH_PARTICIPATION` flag (above 25% by default) uses it. Execution-window
+participation measures intensity while the order was working. A POV strategy
+aims to keep this close to its target rate, and it separates front-loaded
+executions from patient ones. High participation is associated with larger
+market impact and with VWAP benchmarks that partly measure the order itself.
 
-**Limitations.** The rate is averaged over the whole interval. An order that
-trades everything in the first seconds of a long horizon shows a low average
-participation although it was the market while it traded. In ExecLens's
-synthetic market the order's own fills are not printed to the tape, so
-`market_volume` excludes them and participation is "our shares per share
-traded by others". In real data, where your own prints are on the tape, the
-conventional denominator includes them.
+**Limitations.** Benchmark-interval participation is averaged over the whole
+horizon, so an order that trades everything in the first seconds looks
+passive; execution-window participation fixes that but is undefined for
+instantaneous executions (a window of zero length usually contains no prints).
+In ExecLens's synthetic market the order's own fills are not printed to the
+tape, so market volume excludes them and participation is "our shares per
+share traded by others". In real data, where your own prints are on the tape,
+the conventional denominator includes them and the ratio cannot exceed 1.
 
 ---
 

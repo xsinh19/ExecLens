@@ -150,6 +150,10 @@ def test_buy_order_interval_vwap(result: TcaResult) -> None:
     # VWAP cost = (100.08 - 100.09) / 100.09 * 1e4 = -100 / 100.09 bps (better than VWAP).
     assert row["vwap_cost_bps"] == pytest.approx(-100 / 100.09, rel=1e-6)
     assert row["participation_rate"] == pytest.approx(300 / 600)
+    # While it was trading, [5, 25], only the t5 print (100 shares) hit the tape:
+    # 300 / 100 = 3.0 (simulated fills are not on the tape, so this can exceed 1).
+    assert row["execution_window_volume"] == 100
+    assert row["execution_participation_rate"] == pytest.approx(3.0)
     assert row["quantity_to_market_volume"] == pytest.approx(300 / 600)
 
 

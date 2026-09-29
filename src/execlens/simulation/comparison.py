@@ -120,6 +120,9 @@ def _summary(orders: pl.DataFrame, horizons: tuple[int, ...]) -> pl.DataFrame:
             pl.col("completion_ratio").mean().alias("mean_completion_ratio"),
             pl.col("order_duration_seconds").mean().alias("mean_duration_seconds"),
             pl.col("participation_rate").mean().alias("mean_participation_rate"),
+            pl.col("execution_participation_rate")
+            .mean()
+            .alias("mean_execution_participation_rate"),
             pl.col("n_fills").mean().alias("mean_fills"),
         )
         .sort(pl.col("implementable").not_(), "mean_arrival_cost_bps", nulls_last=True)

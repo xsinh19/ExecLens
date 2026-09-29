@@ -40,7 +40,7 @@ from execlens.data.validation import validate_tables
 from execlens.tca.alignment import (
     ContextStatus,
     attach_future_mids,
-    attach_interval_volume,
+    attach_interval_volumes,
     attach_quote_context,
     prepare_quotes,
 )
@@ -153,6 +153,8 @@ def order_columns(horizons: tuple[int, ...]) -> list[str]:
         "market_vwap",
         "quantity_to_market_volume",
         "participation_rate",
+        "execution_window_volume",
+        "execution_participation_rate",
         "arrival_cost_bps",
         "vwap_cost_bps",
         "effective_spread_bps",
@@ -272,7 +274,15 @@ def build_order_plan(
         .otherwise(pl.col("last_fill_timestamp"))
         .alias("benchmark_end"),
     )
-    plan = attach_interval_volume(plan, trades, start="benchmark_start", end="benchmark_end")
+    plan = attach_interval_volumes(
+        plan,
+        trades,
+        {
+            "market": ("benchmark_start", "benchmark_end"),
+            # Volume while the order was actually trading: [arrival, last fill].
+            "execution_window": ("benchmark_start", "last_fill_timestamp"),
+        },
+    )
 
     executed = pl.col("executed_quantity")
     all_fills_have_quote = (pl.col("n_fills") > 0) & (pl.col("n_fills_without_quote") == 0)
@@ -287,6 +297,9 @@ def build_order_plan(
         ).alias("order_duration_seconds"),
         safe_ratio(pl.col("quantity"), pl.col("market_volume")).alias("quantity_to_market_volume"),
         safe_ratio(executed, pl.col("market_volume")).alias("participation_rate"),
+        safe_ratio(executed, pl.col("execution_window_volume")).alias(
+            "execution_participation_rate"
+        ),
         cost_bps(pl.col("side_sign"), pl.col("avg_fill_price"), pl.col("arrival_mid")).alias(
             "arrival_cost_bps"
         ),

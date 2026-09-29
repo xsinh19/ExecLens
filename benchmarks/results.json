@@ -99,5 +99,72 @@
         "speedup_median": 12.25
       }
     }
+  },
+  "api": {
+    "generated_at": "2026-09-29T21:40:47+00:00",
+    "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "python": "3.12.14",
+      "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
+      "logical_cpus": 16,
+      "memory_gb": 15.6,
+      "power": {
+        "on_battery": false,
+        "battery_percent": 92,
+        "power_scheme": "Silent"
+      },
+      "polars": "1.44.2",
+      "polars_threads": 16,
+      "numpy": "2.5.3",
+      "execlens": "0.1.0"
+    },
+    "dataset": "data/generated/benchmark",
+    "orders": 5400,
+    "startup_seconds": 4.53,
+    "requests_per_endpoint": 300,
+    "warmup_requests": 30,
+    "client": "single sequential keep-alive HTTP/1.1 client (http.client) on localhost",
+    "endpoints": [
+      {
+        "endpoint": "/health",
+        "p50_ms": 2.896,
+        "p95_ms": 5.898,
+        "p99_ms": 9.652,
+        "mean_ms": 3.223,
+        "target_p95_ms": 50
+      },
+      {
+        "endpoint": "/api/v1/orders?limit=100",
+        "p50_ms": 5.282,
+        "p95_ms": 10.803,
+        "p99_ms": 21.134,
+        "mean_ms": 6.09,
+        "target_p95_ms": "-"
+      },
+      {
+        "endpoint": "/api/v1/orders/{order_id}",
+        "p50_ms": 4.387,
+        "p95_ms": 7.283,
+        "p99_ms": 9.286,
+        "mean_ms": 4.62,
+        "target_p95_ms": 300
+      },
+      {
+        "endpoint": "/api/v1/orders/{order_id}/tca",
+        "p50_ms": 4.083,
+        "p95_ms": 6.94,
+        "p99_ms": 11.733,
+        "mean_ms": 4.404,
+        "target_p95_ms": 300
+      },
+      {
+        "endpoint": "/api/v1/summary",
+        "p50_ms": 2.486,
+        "p95_ms": 4.486,
+        "p99_ms": 6.069,
+        "mean_ms": 2.784,
+        "target_p95_ms": "-"
+      }
+    ]
   }
 }

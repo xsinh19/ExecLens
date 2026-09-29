@@ -46,6 +46,8 @@ _BASE_COLUMNS = [
     "market_vwap",
     "quantity_to_market_volume",
     "participation_rate",
+    "execution_window_volume",
+    "execution_participation_rate",
     "arrival_cost_bps",
     "vwap_cost_bps",
     "effective_spread_bps",
@@ -214,6 +216,13 @@ def reference_tca(
             market_notional = sum((p * s for p, s in zip(prices, sizes, strict=True)), 0.0)
             vwap = market_notional / volume if volume > 0 else None
 
+        # Volume while the order was actually trading: [arrival, last fill].
+        window_volume: int | None = None
+        if last_fill is not None and sym in t_time:
+            lo = bisect_left(t_time[sym], arrival)
+            hi = bisect_right(t_time[sym], last_fill)
+            window_volume = sum(t_size[sym][lo:hi])
+
         complete = executed > 0 and without_quote == 0
         record: dict[str, Any] = {
             "order_id": oid,
@@ -233,6 +242,8 @@ def reference_tca(
             "market_vwap": vwap,
             "quantity_to_market_volume": quantity / volume if volume else None,
             "participation_rate": executed / volume if volume else None,
+            "execution_window_volume": window_volume,
+            "execution_participation_rate": executed / window_volume if window_volume else None,
             "arrival_cost_bps": (
                 None
                 if avg_price is None or arrival_mid is None
@@ -260,6 +271,7 @@ def reference_tca(
         "n_fills",
         "n_fills_without_quote",
         "market_volume",
+        "execution_window_volume",
         *(f"markout_{h}s_unavailable_fills" for h in horizons),
     }
     schema: dict[str, pl.DataType] = {}

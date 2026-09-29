@@ -97,7 +97,7 @@ def test_markdown_is_rendered_only_from_results(results: dict[str, Any], tmp_pat
     core = results["workloads"]["core_in_memory"]
     assert f"**{core['speedup_median']:.1f}x**" in text
     assert f"{results['dataset']['fills']:,} fills" in text
-    assert "| `/health` | 1.00 | 2.00 | 3.00 | 50 ms |" in text
+    assert "| `/health` | 1.00 | 2.00 | 3.00 | < 50 ms |" in text
 
     doc = tmp_path / "BENCHMARKS.md"
     doc.write_text(

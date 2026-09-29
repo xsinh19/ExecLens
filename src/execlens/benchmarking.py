@@ -515,9 +515,11 @@ def render_markdown(results: dict[str, Any]) -> str:
             "|---|---:|---:|---:|---|",
         ]
         for row in api["endpoints"]:
+            target = row["target_p95_ms"]
+            target_text = f"< {target} ms" if isinstance(target, int | float) else "-"
             lines.append(
                 f"| `{row['endpoint']}` | {row['p50_ms']:.2f} | {row['p95_ms']:.2f} | "
-                f"{row['p99_ms']:.2f} | {row['target_p95_ms']} ms |"
+                f"{row['p99_ms']:.2f} | {target_text} |"
             )
     return "\n".join(lines)
 

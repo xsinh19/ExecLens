@@ -20,6 +20,7 @@ which look up the prevailing quote at ``t + h`` (:func:`attach_future_mid`).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
 from enum import StrEnum
 
@@ -164,20 +165,24 @@ def attach_future_mids(
     return plan.drop("_last_quote_timestamp")
 
 
-def attach_interval_volume(
-    frame: pl.LazyFrame, trades: pl.LazyFrame, *, start: str, end: str
+def attach_interval_volumes(
+    frame: pl.LazyFrame, trades: pl.LazyFrame, intervals: Mapping[str, tuple[str, str]]
 ) -> pl.LazyFrame:
-    """Market volume and notional traded in the closed interval ``[start, end]``.
+    """Market volume and notional traded in closed intervals ``[start, end]``.
 
-    Uses per-symbol running totals of size and price*size: the amount traded
-    in ``[a, b]`` is ``C(<= b) - C(< a)``, with both endpoints located by
-    backward as-of joins (the ``a`` side excludes exact matches). This costs
-    O((trades + rows) log n) instead of scanning the tape once per order.
+    ``intervals`` maps an output name to a (start column, end column) pair;
+    for each, ``{name}_volume`` (Int64) and ``{name}_notional`` (Float64) are
+    added.
 
-    Adds ``market_volume`` (Int64) and ``market_notional`` (Float64), both null
-    where ``end`` is null or the symbol has no trade data at all (unknown is
-    not the same as zero). An interval with trade data but no prints in it
-    has volume 0.
+    Uses per-symbol running totals of size and price*size, built once: the
+    amount traded in ``[a, b]`` is ``C(<= b) - C(< a)``, with both endpoints
+    located by backward as-of joins (the ``a`` side excludes exact matches).
+    This costs O((trades + rows) log n) instead of scanning the tape once per
+    order.
+
+    Both outputs are null where ``end`` is null or the symbol has no trade
+    data at all (unknown is not the same as zero). An interval with trade data
+    but no prints in it has volume 0.
     """
     running = (
         trades.select("symbol", "timestamp", "price", "size")
@@ -190,46 +195,44 @@ def attach_interval_volume(
         )
     )
     traded_symbols = trades.select("symbol").unique().with_columns(pl.lit(True).alias("_has_tape"))
-    end_key = pl.coalesce(pl.col(end), pl.col(start)).alias("_end_key")
-    upto_end = (
-        frame.join(traded_symbols, on="symbol", how="left")
-        .with_columns(end_key)
-        .sort("symbol", "_end_key")
-        .join_asof(
-            running,
-            left_on="_end_key",
-            right_on="_trade_ts",
-            by="symbol",
-            strategy="backward",
-            check_sortedness=False,
+    plan = frame.join(traded_symbols, on="symbol", how="left")
+    for name, (start, end) in intervals.items():
+        end_key = pl.coalesce(pl.col(end), pl.col(start)).alias("_end_key")
+        plan = (
+            plan.with_columns(end_key)
+            .sort("symbol", "_end_key")
+            .join_asof(
+                running,
+                left_on="_end_key",
+                right_on="_trade_ts",
+                by="symbol",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .rename({"_cum_volume": "_end_volume", "_cum_notional": "_end_notional"})
+            .drop("_trade_ts")
+            .sort("symbol", start)
+            .join_asof(
+                running,
+                left_on=start,
+                right_on="_trade_ts",
+                by="symbol",
+                strategy="backward",
+                allow_exact_matches=False,
+                check_sortedness=False,
+            )
+            .rename({"_cum_volume": "_start_volume", "_cum_notional": "_start_notional"})
+            .drop("_trade_ts")
         )
-        .rename({"_cum_volume": "_end_volume", "_cum_notional": "_end_notional"})
-        .drop("_trade_ts")
-    )
-    before_start = (
-        upto_end.sort("symbol", start)
-        .join_asof(
-            running,
-            left_on=start,
-            right_on="_trade_ts",
-            by="symbol",
-            strategy="backward",
-            allow_exact_matches=False,
-            check_sortedness=False,
-        )
-        .rename({"_cum_volume": "_start_volume", "_cum_notional": "_start_notional"})
-        .drop("_trade_ts")
-    )
-    known = pl.col(end).is_not_null() & pl.col("_has_tape").fill_null(False)
-    return before_start.with_columns(
-        pl.when(known)
-        .then(pl.col("_end_volume").fill_null(0) - pl.col("_start_volume").fill_null(0))
-        .otherwise(None)
-        .alias("market_volume"),
-        pl.when(known)
-        .then(pl.col("_end_notional").fill_null(0.0) - pl.col("_start_notional").fill_null(0.0))
-        .otherwise(None)
-        .alias("market_notional"),
-    ).drop(
-        "_has_tape", "_end_key", "_end_volume", "_end_notional", "_start_volume", "_start_notional"
-    )
+        known = pl.col(end).is_not_null() & pl.col("_has_tape").fill_null(False)
+        plan = plan.with_columns(
+            pl.when(known)
+            .then(pl.col("_end_volume").fill_null(0) - pl.col("_start_volume").fill_null(0))
+            .otherwise(None)
+            .alias(f"{name}_volume"),
+            pl.when(known)
+            .then(pl.col("_end_notional").fill_null(0.0) - pl.col("_start_notional").fill_null(0.0))
+            .otherwise(None)
+            .alias(f"{name}_notional"),
+        ).drop("_end_key", "_end_volume", "_end_notional", "_start_volume", "_start_notional")
+    return plan.drop("_has_tape")
