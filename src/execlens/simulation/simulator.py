@@ -35,7 +35,7 @@ from execlens.simulation.vwap import OracleVwapBenchmark, VolumeProfile, VwapStr
 class SimulationConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    slice_seconds: float = Field(default=30.0, gt=0, description="Decision interval.")
+    slice_seconds: float = Field(default=30.0, ge=1, description="Decision interval (s).")
     pov_participation_rate: float = Field(default=0.10, gt=0, le=1)
     stale_quote_tolerance_seconds: float = Field(
         default=DEFAULT_STALE_QUOTE_TOLERANCE_SECONDS, gt=0
@@ -52,7 +52,6 @@ class SimulatedFill:
     timestamp_us: int
     quantity: int
     price: float
-    impact_bps: float
 
 
 @dataclass(frozen=True)
@@ -89,15 +88,13 @@ def simulate_order(
         if not snapshot.has_fresh_quote(config.stale_quote_tolerance_seconds):
             skipped += 1
             continue
-        price, impact = config.impact.execution_price(order.side, clip, snapshot)
         fills.append(
             SimulatedFill(
                 fill_id=f"{order.order_id}-{step:04d}",
                 order_id=order.order_id,
                 timestamp_us=t_us,
                 quantity=clip,
-                price=price,
-                impact_bps=impact,
+                price=config.impact.execution_price(order.side, clip, snapshot),
             )
         )
         executed += clip

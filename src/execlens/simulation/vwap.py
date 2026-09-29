@@ -16,6 +16,7 @@ and named ``ORACLE_VWAP`` everywhere it appears.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
@@ -23,16 +24,15 @@ from itertools import accumulate, pairwise
 
 import numpy as np
 
+from execlens.data.schemas import MICROS, to_epoch_us
 from execlens.data.synthetic import SESSION_OPEN_UTC, Instrument, historical_volume_profile
 from execlens.simulation.base import (
-    MICROS,
     ExecutionStrategy,
     MarketView,
     OrderPlan,
     ParentOrder,
     allocate,
     slice_boundaries,
-    to_epoch_us,
 )
 
 
@@ -52,8 +52,10 @@ class VolumeProfile:
     def __post_init__(self) -> None:
         if self.bucket_seconds <= 0 or not self.fractions:
             raise ValueError("profile needs a positive bucket size and at least one bucket")
-        if any(f < 0 for f in self.fractions) or abs(sum(self.fractions) - 1.0) > 1e-9:
-            raise ValueError("profile fractions must be non-negative and sum to 1")
+        if not all(math.isfinite(f) and f >= 0 for f in self.fractions):
+            raise ValueError("profile fractions must be finite and non-negative")
+        if abs(sum(self.fractions) - 1.0) > 1e-9:
+            raise ValueError("profile fractions must sum to 1")
 
     @classmethod
     def from_history(

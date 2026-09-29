@@ -17,7 +17,6 @@ from execlens.api.schemas import (
     Costs,
     Diagnostics,
     ExecutionStats,
-    Fill,
     FillTca,
     FlagCount,
     GroupStats,
@@ -31,6 +30,7 @@ from execlens.api.schemas import (
     StrategyResult,
     SummaryResponse,
 )
+from execlens.data.schemas import Fill
 from execlens.services.analysis import AnalysisResult
 from execlens.simulation.comparison import ComparisonRequest, ComparisonResult
 from execlens.simulation.impact import ImpactModel
@@ -47,9 +47,7 @@ def order_summary(row: Row) -> OrderSummary:
 def order_detail(row: Row, fills: pl.DataFrame) -> OrderDetail:
     fields = {k: row[k] for k in OrderDetail.model_fields if k != "fills"}
     fields["fills"] = [
-        Fill(
-            fill_id=f["fill_id"], timestamp=f["timestamp"], quantity=f["quantity"], price=f["price"]
-        )
+        Fill.model_validate({k: f[k] for k in Fill.model_fields})
         for f in fills.iter_rows(named=True)
     ]
     return OrderDetail.model_validate(fields)

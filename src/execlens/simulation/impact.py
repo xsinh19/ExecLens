@@ -47,12 +47,10 @@ class ImpactModel(BaseModel):
         ratio = clip_quantity / max(recent_volume, self.min_reference_volume)
         return float(min(self.coefficient_bps * ratio**self.exponent, self.max_impact_bps))
 
-    def execution_price(
-        self, side: Side, clip_quantity: int, snapshot: MarketSnapshot
-    ) -> tuple[float, float]:
-        """(fill price, impact in bps) for a marketable clip at ``snapshot``."""
+    def execution_price(self, side: Side, clip_quantity: int, snapshot: MarketSnapshot) -> float:
+        """Fill price of a marketable clip at ``snapshot``: the touch plus impact."""
         base = snapshot.ask if side is Side.BUY else snapshot.bid
         if base is None:
             raise ValueError("cannot price a fill without a quote")
         impact = self.impact_bps(clip_quantity, snapshot.trailing_volume)
-        return base * (1.0 + side.sign * impact / BPS), impact
+        return base * (1.0 + side.sign * impact / BPS)

@@ -26,10 +26,10 @@ from typing import Any
 
 import polars as pl
 
+from execlens.data.schemas import MICROS
 from execlens.tca.engine import TcaConfig
 
 BPS = 10_000.0
-MICROS = 1_000_000
 
 # Order-level columns produced by the reference implementation; the engine
 # produces a superset and must agree on all of these.

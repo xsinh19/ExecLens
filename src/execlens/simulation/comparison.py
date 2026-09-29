@@ -1,10 +1,15 @@
 """Controlled comparison of execution strategies on identical market scenarios.
 
-For each trial a fresh session of the chosen scenario is generated (seeded)
-and one parent order arrives at a random time. **Every strategy trades the
-same order in the same session**, so differences between strategies come
-from the strategies, not from different markets. Results are scored with the
-same TCA engine used for any other dataset.
+For each trial one parent order arrives at a random time in a fresh session
+of the chosen scenario (seeded). **Every strategy trades the same order in the
+same session**, so differences between strategies come from the strategies,
+not from different markets. Results are scored with the same TCA engine used
+for any other dataset.
+
+Only the part of each session the order needs is simulated: the impact
+model's volume look-back before arrival, the horizon, and the markout buffer
+after it. Requests are capped by a work budget (simulated market seconds and
+strategy decisions), so one request cannot tie up a server for minutes.
 
 Conclusions are computed from the results (never hard-coded) and are
 specific to the scenario, parameters and number of trials; a 95% confidence
@@ -22,16 +27,17 @@ import numpy as np
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from execlens.data.schemas import ORDER_SCHEMA, Side
+from execlens.data.schemas import MICROS, ORDER_SCHEMA, Side, to_epoch_us
 from execlens.data.synthetic import (
     SCENARIOS,
     TRADING_DAY_SECONDS,
     Instrument,
     MarketConfig,
     MarketData,
-    generate_market,
+    SessionWindow,
+    generate_windows,
 )
-from execlens.simulation.base import MarketView, ParentOrder, to_epoch_us
+from execlens.simulation.base import MarketView, ParentOrder
 from execlens.simulation.simulator import (
     SimulatedExecution,
     SimulationConfig,
@@ -46,6 +52,12 @@ IMPLEMENTABLE_STRATEGIES: Final = ("IMMEDIATE", "TWAP", "VWAP", "POV")
 MIN_COMPLETION: Final = 0.95
 EDGE_SECONDS: Final = 300
 MARKOUT_BUFFER_SECONDS: Final = 300
+WINDOW_PADDING_SECONDS: Final = 60
+"""Market simulated beyond the last markout, so the data does not end exactly there."""
+MAX_SIMULATED_SECONDS: Final = 250_000
+"""Budget: trials x simulated market seconds per trial."""
+MAX_DECISIONS: Final = 100_000
+"""Budget: trials x strategies x decisions per order."""
 _ARRIVAL_STREAM: Final = 99
 
 
@@ -84,6 +96,23 @@ class ComparisonRequest(BaseModel):
             raise ValueError("strategies must be unique")
         return value
 
+    @property
+    def lookback_seconds(self) -> int:
+        """Market history needed before arrival: the impact model's volume window."""
+        return math.ceil(self.simulation.impact.reference_window_seconds)
+
+    @property
+    def window_seconds(self) -> int:
+        """Upper bound on the market seconds simulated per trial."""
+        after_arrival = 1 + self.horizon_seconds + MARKOUT_BUFFER_SECONDS + WINDOW_PADDING_SECONDS
+        return min(self.session_seconds, self.lookback_seconds + after_arrival)
+
+    @property
+    def max_decisions(self) -> int:
+        """Upper bound on strategy decisions: one per slice, per strategy and trial."""
+        per_order = math.ceil(self.horizon_seconds / self.simulation.slice_seconds)
+        return self.trials * (len(self.strategies) + int(self.include_oracle)) * per_order
+
     @model_validator(mode="after")
     def _fits_in_session(self) -> ComparisonRequest:
         needed = self.horizon_seconds + 2 * EDGE_SECONDS + MARKOUT_BUFFER_SECONDS
@@ -94,11 +123,28 @@ class ComparisonRequest(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _within_budget(self) -> ComparisonRequest:
+        simulated = self.trials * self.window_seconds
+        if simulated > MAX_SIMULATED_SECONDS:
+            raise ValueError(
+                f"request too large: {self.trials} trials x {self.window_seconds:,} s of market "
+                f"= {simulated:,} simulated seconds (limit {MAX_SIMULATED_SECONDS:,}); "
+                "reduce trials or the horizon"
+            )
+        if self.max_decisions > MAX_DECISIONS:
+            raise ValueError(
+                f"request too large: up to {self.max_decisions:,} strategy decisions "
+                f"(limit {MAX_DECISIONS:,}); reduce trials, strategies or the horizon, "
+                "or use a longer decision interval"
+            )
+        return self
+
 
 @dataclass(frozen=True)
 class ComparisonResult:
     request: ComparisonRequest
-    market: MarketData
+    market: MarketData  # the simulated window of every trial
     orders: pl.DataFrame
     fills: pl.DataFrame
     summary: pl.DataFrame
@@ -204,18 +250,45 @@ def _conclusions(summary: pl.DataFrame, request: ComparisonRequest) -> tuple[str
     return tuple(notes)
 
 
+def trial_windows(request: ComparisonRequest) -> list[tuple[SessionWindow, int]]:
+    """Each trial's simulated session window and its order's arrival (epoch us).
+
+    Arrivals are drawn from their own random stream, uniformly between
+    ``EDGE_SECONDS`` after the open and the latest time that leaves room for
+    the horizon, the markout buffer and ``EDGE_SECONDS`` before the close.
+    """
+    instrument = Instrument(symbol=f"SIM_{request.scenario.upper()}", scenario=request.scenario)
+    opens = MarketConfig(universe=(instrument,), n_sessions=request.trials).session_opens()
+    rng = np.random.default_rng(np.random.SeedSequence(request.seed, spawn_key=(_ARRIVAL_STREAM,)))
+    latest = (
+        request.session_seconds - request.horizon_seconds - EDGE_SECONDS - MARKOUT_BUFFER_SECONDS
+    )
+    after_arrival = 1 + request.horizon_seconds + MARKOUT_BUFFER_SECONDS + WINDOW_PADDING_SECONDS
+    trials: list[tuple[SessionWindow, int]] = []
+    for session_open in opens:
+        offset_us = math.floor(float(rng.uniform(EDGE_SECONDS, latest)) * MICROS)
+        second = offset_us // MICROS
+        window = SessionWindow(
+            session_open,
+            start_seconds=max(0, second - request.lookback_seconds),
+            end_seconds=min(request.session_seconds, second + after_arrival),
+        )
+        trials.append((window, to_epoch_us(session_open) + offset_us))
+    return trials
+
+
 def compare_strategies(request: ComparisonRequest) -> ComparisonResult:
     """Run every requested strategy on the same generated sessions and score them."""
     config = request.simulation
     symbol = f"SIM_{request.scenario.upper()}"
     instrument = Instrument(symbol=symbol, scenario=request.scenario)
-    market_config = MarketConfig(
-        universe=(instrument,),
-        n_sessions=request.trials,
+    trials = trial_windows(request)
+    market = generate_windows(
+        instrument,
+        [window for window, _ in trials],
         session_seconds=request.session_seconds,
         seed=request.seed,
     )
-    market = generate_market(market_config)
     view = MarketView(
         market.quotes,
         market.trades,
@@ -237,16 +310,10 @@ def compare_strategies(request: ComparisonRequest) -> ComparisonResult:
     if request.include_oracle:
         selected.append(available[OracleVwapBenchmark.name])
 
-    rng = np.random.default_rng(np.random.SeedSequence(request.seed, spawn_key=(_ARRIVAL_STREAM,)))
-    latest = (
-        request.session_seconds - request.horizon_seconds - EDGE_SECONDS - MARKOUT_BUFFER_SECONDS
-    )
     order_rows: list[dict[str, object]] = []
     executions: list[SimulatedExecution] = []
     trial_of: dict[str, int] = {}
-    for trial, session_open in enumerate(market_config.session_opens()):
-        offset = float(rng.uniform(EDGE_SECONDS, latest))
-        arrival_us = to_epoch_us(session_open) + math.floor(offset * 1_000_000)
+    for trial, (_, arrival_us) in enumerate(trials):
         for strategy in selected:
             order = ParentOrder(
                 order_id=f"T{trial + 1:03d}-{strategy.name}",

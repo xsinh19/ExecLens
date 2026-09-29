@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from execlens.data.schemas import Side
+from execlens.data.schemas import Fill, Side
 from execlens.tca.aggregation import TcaSummary
 
 COST = "Basis points. Positive = worse execution for the order, negative = better."
@@ -44,7 +44,7 @@ class ErrorResponse(_Model):
 
 
 class DatasetInfo(_Model):
-    path: str
+    name: str = Field(description="Name of the dataset directory (server paths are not exposed).")
     synthetic: bool
     symbols: list[str]
     quotes: int
@@ -79,13 +79,6 @@ class OrderListResponse(_Model):
     total: int = Field(description="Orders matching the filters (before pagination).")
     limit: int
     offset: int
-
-
-class Fill(_Model):
-    fill_id: str
-    timestamp: datetime
-    quantity: int
-    price: float
 
 
 class OrderDetail(_Model):
@@ -235,7 +228,15 @@ class SummaryResponse(_Model):
 
 
 class SimulationRequest(_Model):
-    """Controlled comparison of execution strategies on one synthetic scenario."""
+    """Controlled comparison of execution strategies on one synthetic scenario.
+
+    Besides the per-field limits, a request must fit the simulation budget:
+    ``trials x (horizon + 601 s)`` simulated market seconds and
+    ``trials x strategies x horizon / slice_seconds`` decisions are capped
+    (422 with the exact figures otherwise).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scenario: ScenarioName = "normal"
     side: Side = Side.BUY

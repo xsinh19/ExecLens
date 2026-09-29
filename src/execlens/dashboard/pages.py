@@ -6,6 +6,7 @@ from typing import Any
 
 import polars as pl
 import streamlit as st
+from pydantic import ValidationError
 
 from execlens.config import Settings
 from execlens.dashboard import charts
@@ -311,9 +312,11 @@ def strategy_lab() -> None:
     with st.form("strategy-lab"):
         c1, c2, c3, c4 = st.columns(4)
         symbol = c1.selectbox(
-            "Symbol (scenario)",
+            "Scenario",
             list(scenarios),
-            format_func=lambda s: f"{s} ({scenarios[s]})",
+            format_func=lambda s: f"{scenarios[s]} ({s})",
+            help="Generates fresh synthetic sessions with this symbol's scenario parameters; "
+            "the loaded dataset's market data is not reused.",
         )
         side = c2.segmented_control("Side", ["BUY", "SELL"], default="BUY")
         quantity = c3.number_input("Parent quantity", 100, 2_000_000, 20_000, step=1_000)
@@ -340,21 +343,26 @@ def strategy_lab() -> None:
         if not strategies:
             st.warning("Select at least one strategy.")
             return
-        request = ComparisonRequest(
-            scenario=scenarios[symbol],
-            side=Side(side or "BUY"),
-            quantity=int(quantity),
-            horizon_seconds=int(horizon_minutes) * 60,
-            strategies=tuple(strategies),
-            include_oracle=oracle,
-            trials=int(trials),
-            seed=int(seed),
-            simulation=SimulationConfig(
-                slice_seconds=float(slice_seconds),
-                pov_participation_rate=float(pov_rate),
-                impact=ImpactModel(coefficient_bps=float(impact)),
-            ),
-        )
+        try:
+            request = ComparisonRequest(
+                scenario=scenarios[symbol],
+                side=Side(side or "BUY"),
+                quantity=int(quantity),
+                horizon_seconds=int(horizon_minutes) * 60,
+                strategies=tuple(strategies),
+                include_oracle=oracle,
+                trials=int(trials),
+                seed=int(seed),
+                simulation=SimulationConfig(
+                    slice_seconds=float(slice_seconds),
+                    pov_participation_rate=float(pov_rate),
+                    impact=ImpactModel(coefficient_bps=float(impact)),
+                ),
+            )
+        except ValidationError as exc:
+            message = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
+            st.error(f"{message[:1].upper()}{message[1:]}.")
+            return
         st.session_state["lab_request"] = request.model_dump_json()
     summary, orders, conclusions = run_comparison(st.session_state["lab_request"])
 

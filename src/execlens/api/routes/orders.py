@@ -13,6 +13,7 @@ from execlens.api.state import ApiState
 from execlens.data.schemas import Side
 
 router = APIRouter(prefix="/api/v1/orders", tags=["orders"])
+MAX_OFFSET = 10_000_000
 NOT_FOUND: dict[int | str, dict[str, Any]] = {
     404: {"model": ErrorResponse, "description": "Unknown order_id"}
 }
@@ -38,7 +39,7 @@ def list_orders(
     strategy: Annotated[str | None, Query(max_length=32)] = None,
     flagged: bool | None = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
 ) -> OrderListResponse:
     """Orders in arrival order, optionally filtered by symbol, side, strategy and flag state."""
     orders = _state(request).analysis.orders

@@ -1,4 +1,5 @@
-from datetime import date
+import math
+from datetime import date, datetime
 
 import numpy as np
 import polars as pl
@@ -12,8 +13,11 @@ from execlens.data.synthetic import (
     MarketConfig,
     OrderConfig,
     Scenario,
+    SessionWindow,
+    _simulate_session,
     generate_market,
     generate_orders,
+    generate_windows,
     historical_volume_profile,
 )
 from execlens.data.validation import validate_orders, validate_quotes, validate_trades
@@ -234,3 +238,64 @@ def test_invalid_configurations_are_rejected() -> None:
 def test_scenario_ticks_per_unit() -> None:
     scenario = Scenario.model_validate(SCENARIOS["normal"].model_dump() | {"tick_size": 0.05})
     assert scenario.ticks_per_unit == 20
+
+
+# --- session windows (strategy comparisons simulate only what an order needs) --
+
+
+def seconds_after(frame: pl.DataFrame, session_open: datetime) -> pl.Series:
+    return (frame["timestamp"] - session_open).dt.total_microseconds() / 1e6
+
+
+def test_a_whole_session_window_is_the_generated_session() -> None:
+    config = MarketConfig(universe=(DEFAULT_UNIVERSE[0],), session_seconds=3_600, seed=11)
+    whole = SessionWindow(config.session_opens()[0], 0, 3_600)
+    windowed = generate_windows(DEFAULT_UNIVERSE[0], [whole], session_seconds=3_600, seed=11)
+    session = generate_market(config)
+    assert windowed.quotes.equals(session.quotes)
+    assert windowed.trades.equals(session.trades)
+
+
+def test_windows_contain_only_their_seconds_and_pass_validation() -> None:
+    opens = MarketConfig(n_sessions=2).session_opens()
+    windows = [SessionWindow(opens[0], 7_200, 9_000), SessionWindow(opens[1], 600, 1_500)]
+    market = generate_windows(DEFAULT_UNIVERSE[0], windows, seed=3)
+    validate_quotes(market.quotes)
+    validate_trades(market.trades)
+    for window in windows:
+        day = pl.col("timestamp").dt.date() == window.session_open.date()
+        quotes = seconds_after(market.quotes.filter(day), window.session_open)
+        trades = seconds_after(market.trades.filter(day), window.session_open)
+        assert quotes.min() == window.start_seconds  # a quote at the window start
+        assert quotes.max() < window.end_seconds
+        assert trades.min() >= window.start_seconds
+        assert trades.max() < window.end_seconds
+
+
+def test_windows_keep_the_sessions_time_of_day_pattern() -> None:
+    session_open = MarketConfig().session_opens()[0]
+    near_open = SessionWindow(session_open, 0, 1_800)
+    midday = SessionWindow(session_open, 10_800, 12_600)
+    busy = generate_windows(DEFAULT_UNIVERSE[0], [near_open], seed=5).trades.height
+    quiet = generate_windows(DEFAULT_UNIVERSE[0], [midday], seed=5).trades.height
+    # U-shaped intensity: about 1.7x the daily mean near the open, 0.6x at midday.
+    assert busy > 2 * quiet
+
+
+def test_a_window_starts_where_the_random_walk_would_be() -> None:
+    # No volatility, strong drift: the first mid of a window starting 11,700 s
+    # (half a trading day) after the open is initial * exp(drift / 2).
+    scenario = SCENARIOS["normal"].model_copy(update={"daily_volatility": 0.0, "daily_drift": 0.2})
+    session = _simulate_session(
+        scenario, 0, 23_400, 100.0, np.random.default_rng(1), window=(11_700, 12_000)
+    )
+    first_mid = (session.bid[0] + session.ask[0]) / 2
+    assert first_mid == pytest.approx(100.0 * math.exp(0.1), abs=0.01)
+
+
+@pytest.mark.parametrize("window", [(100, 100), (-1, 50), (0, 3_601)])
+def test_windows_outside_the_session_are_rejected(window: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="window"):
+        _simulate_session(
+            SCENARIOS["normal"], 0, 3_600, 100.0, np.random.default_rng(1), window=window
+        )

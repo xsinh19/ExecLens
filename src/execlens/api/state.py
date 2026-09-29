@@ -5,12 +5,16 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Final
 
 import polars as pl
 
 from execlens.api import mapping
 from execlens.api.schemas import DatasetInfo, SimulationResponse, SummaryResponse
 from execlens.services.analysis import AnalysisResult
+
+MAX_CONCURRENT_SIMULATIONS: Final = 2
+"""Simulations are CPU-bound; more than this at once only slows every one down."""
 
 
 class SimulationStore:
@@ -46,8 +50,11 @@ class ApiState:
     """
 
     analysis: AnalysisResult
-    source: str
+    dataset_name: str
     simulations: SimulationStore = field(default_factory=SimulationStore)
+    simulation_slots: threading.BoundedSemaphore = field(
+        default_factory=lambda: threading.BoundedSemaphore(MAX_CONCURRENT_SIMULATIONS)
+    )
     dataset_info: DatasetInfo = field(init=False)
     summary: SummaryResponse = field(init=False)
     order_rows: dict[str, int] = field(init=False)
@@ -56,7 +63,7 @@ class ApiState:
     def __post_init__(self) -> None:
         dataset = self.analysis.dataset
         self.dataset_info = DatasetInfo(
-            path=self.source,
+            name=self.dataset_name,
             synthetic=bool(dataset.metadata.get("synthetic", False)),
             symbols=dataset.symbols,
             quotes=dataset.quotes.height,

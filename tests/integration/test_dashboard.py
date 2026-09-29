@@ -97,6 +97,16 @@ def test_strategy_lab_runs_a_comparison() -> None:
     assert set(results["strategy"]) == set(STRATEGY_ORDER)
 
 
+def test_strategy_lab_explains_requests_over_the_budget() -> None:
+    app = run_page("strategy_lab")
+    next(s for s in app.slider if s.label == "Trials (sessions)").set_value(50)
+    next(s for s in app.slider if s.label == "Horizon (minutes)").set_value(120)
+    app.button[0].click().run()
+    assert not app.exception, [e.value for e in app.exception]
+    assert app.error[0].value.startswith("Request too large")
+    assert "simulated seconds" in app.error[0].value
+
+
 def test_benchmarks_page_reads_the_results_file() -> None:
     results = json.loads((ROOT / "benchmarks" / "results.json").read_text(encoding="utf-8"))
     app = run_page("benchmarks")

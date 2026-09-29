@@ -11,7 +11,6 @@ from execlens.data.schemas import (
     TRADE_SCHEMA,
     Fill,
     Order,
-    Quote,
 )
 from execlens.data.validation import (
     DataValidationError,
@@ -221,28 +220,6 @@ def test_execution_dataset_validated_constructor() -> None:
 
 # The record-level (Pydantic) and frame-level (Polars) validators must agree.
 UTC_TS = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
-INVALID_QUOTES = [
-    (10.02, 10.00, 100, 100),
-    (0.0, 10.00, 100, 100),
-    (9.99, 10.01, -1, 100),
-]
-
-
-@pytest.mark.parametrize(("bid", "ask", "bid_size", "ask_size"), INVALID_QUOTES)
-def test_record_and_frame_validators_agree_on_quotes(
-    bid: float, ask: float, bid_size: int, ask_size: int
-) -> None:
-    with pytest.raises(ValidationError):
-        Quote(
-            timestamp=UTC_TS,
-            symbol="SYN",
-            bid_price=bid,
-            ask_price=ask,
-            bid_size=bid_size,
-            ask_size=ask_size,
-        )
-    with pytest.raises(DataValidationError):
-        validate_quotes(quotes_frame([(0, "SYN", bid, ask, bid_size, ask_size)]))
 
 
 @pytest.mark.parametrize("quantity", [0, -1])

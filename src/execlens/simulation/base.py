@@ -17,22 +17,13 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, ClassVar
 
 import numpy as np
 import numpy.typing as npt
 import polars as pl
 
-from execlens.data.schemas import Side
-
-MICROS = 1_000_000
-
-
-def to_epoch_us(value: datetime) -> int:
-    """Exact microseconds since the Unix epoch for an aware datetime."""
-    delta = value - datetime(1970, 1, 1, tzinfo=value.tzinfo)
-    return (delta.days * 86_400 + delta.seconds) * MICROS + delta.microseconds
+from execlens.data.schemas import MICROS, Order, Side, to_epoch_us
 
 
 @dataclass(frozen=True)
@@ -52,14 +43,15 @@ class ParentOrder:
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> ParentOrder:
-        """Build from a row of the canonical orders table."""
+        """Build from a row of the canonical orders table, validated as an :class:`Order`."""
+        order = Order.model_validate({name: row.get(name) for name in Order.model_fields})
         return cls(
-            order_id=str(row["order_id"]),
-            symbol=str(row["symbol"]),
-            side=Side(row["side"]),
-            quantity=int(row["quantity"]),
-            arrival_us=to_epoch_us(row["arrival_timestamp"]),
-            horizon_seconds=row["execution_horizon_seconds"],
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            arrival_us=to_epoch_us(order.arrival_timestamp),
+            horizon_seconds=order.execution_horizon_seconds,
         )
 
     def require_horizon(self) -> float:

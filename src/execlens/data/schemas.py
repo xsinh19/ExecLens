@@ -1,14 +1,14 @@
 """Canonical ExecLens data model.
 
-Two representations of the same four record types are defined here:
-
-* Polars column schemas (``QUOTE_SCHEMA`` ...) used for bulk, vectorised
-  processing. Frame-level validation lives in :mod:`execlens.data.validation`.
-* Pydantic models (:class:`Quote` ...) used at external boundaries (API
-  payloads, simulator inputs/outputs) where records arrive one at a time.
-
-Both enforce the same rules; ``tests/unit/test_validation.py`` checks that they
-agree on the same invalid inputs.
+* Polars column schemas (``QUOTE_SCHEMA``, ``TRADE_SCHEMA``, ``ORDER_SCHEMA``,
+  ``FILL_SCHEMA``) describe the four tables and are used for all bulk,
+  vectorised processing. Frame-level validation lives in
+  :mod:`execlens.data.validation`.
+* Pydantic models for the records that cross a boundary one at a time:
+  :class:`Order` (a parent order handed to the simulator) and :class:`Fill`
+  (fills returned by the API). They enforce the same rules as the frame
+  validators; ``tests/unit/test_validation.py`` checks that both reject the
+  same invalid inputs.
 
 Conventions
 -----------
@@ -23,15 +23,31 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Self
 
 import polars as pl
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 BPS = 10_000.0
 """Basis points per unit: 1 bp = 0.01% = 1/10,000."""
 
+MICROS = 1_000_000
+"""Microseconds per second (timestamps have microsecond resolution)."""
+
 TIMESTAMP_DTYPE = pl.Datetime("us", "UTC")
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def to_epoch_us(value: datetime) -> int:
+    """Exact microseconds since the Unix epoch for a timezone-aware datetime.
+
+    Integer ``timedelta`` arithmetic avoids float rounding, and the epoch is
+    UTC, so a datetime in any time zone maps to the same instant.
+    """
+    if value.tzinfo is None:
+        raise ValueError("expected a timezone-aware datetime")
+    delta = value - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * MICROS + delta.microseconds
 
 
 class Side(StrEnum):
@@ -94,48 +110,6 @@ def _require_utc(value: datetime) -> datetime:
 
 class _Record(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-
-
-class Quote(_Record):
-    """Top-of-book (Level-1) quote."""
-
-    timestamp: AwareDatetime
-    symbol: str = Field(min_length=1)
-    bid_price: float = Field(gt=0, allow_inf_nan=False)
-    ask_price: float = Field(gt=0, allow_inf_nan=False)
-    bid_size: int = Field(ge=0)
-    ask_size: int = Field(ge=0)
-
-    _utc = field_validator("timestamp")(_require_utc)
-
-    @model_validator(mode="after")
-    def _not_crossed(self) -> Self:
-        if self.bid_price > self.ask_price:
-            raise ValueError("crossed market: bid_price must be <= ask_price")
-        return self
-
-    @property
-    def mid(self) -> float:
-        return (self.bid_price + self.ask_price) / 2.0
-
-    @property
-    def spread(self) -> float:
-        return self.ask_price - self.bid_price
-
-    @property
-    def spread_bps(self) -> float:
-        return self.spread / self.mid * BPS
-
-
-class MarketTrade(_Record):
-    """A print on the market tape (anyone's trade, not necessarily ours)."""
-
-    timestamp: AwareDatetime
-    symbol: str = Field(min_length=1)
-    price: float = Field(gt=0, allow_inf_nan=False)
-    size: int = Field(gt=0)
-
-    _utc = field_validator("timestamp")(_require_utc)
 
 
 class Order(_Record):

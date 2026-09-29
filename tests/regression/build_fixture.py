@@ -25,10 +25,10 @@ from typing import Any
 import polars as pl
 
 from execlens.data.loader import write_dataset
-from execlens.data.schemas import Side
+from execlens.data.schemas import Side, to_epoch_us
 from execlens.data.synthetic import Instrument, MarketConfig, OrderConfig
 from execlens.services.datasets import DatasetSpec, generate_dataset
-from execlens.simulation.base import MarketView, ParentOrder, to_epoch_us
+from execlens.simulation.base import MarketView, ParentOrder
 from execlens.simulation.simulator import SimulationConfig, build_strategies, simulate_order
 from execlens.simulation.vwap import VolumeProfile
 from execlens.tca.engine import run_tca

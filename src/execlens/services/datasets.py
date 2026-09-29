@@ -70,11 +70,13 @@ def preset(name: str) -> DatasetSpec:
         raise ValueError(f"unknown preset {name!r}; choose from {sorted(PRESETS)}") from None
 
 
-def generate_dataset(spec: DatasetSpec) -> ExecutionDataset:
-    """Generate market, orders and simulated fills for ``spec``."""
-    market = generate_market(spec.market)
-    orders = generate_orders(spec.market, spec.orders)
-    profiles = {
+def volume_profiles(spec: DatasetSpec) -> dict[str, VolumeProfile]:
+    """Expected intraday volume profile per symbol, built from prior sessions only.
+
+    Takes the spec, not the generated market: VWAP schedules cannot depend on
+    the sessions they trade in.
+    """
+    return {
         instrument.symbol: VolumeProfile.from_history(
             instrument,
             session_seconds=spec.market.session_seconds,
@@ -84,10 +86,16 @@ def generate_dataset(spec: DatasetSpec) -> ExecutionDataset:
         )
         for instrument in spec.market.universe
     }
+
+
+def generate_dataset(spec: DatasetSpec) -> ExecutionDataset:
+    """Generate market, orders and simulated fills for ``spec``."""
+    market = generate_market(spec.market)
+    orders = generate_orders(spec.market, spec.orders)
     executions = simulate_orders(
         orders,
         market_views(market.quotes, market.trades, spec.simulation),
-        build_strategies(spec.simulation, profiles=profiles),
+        build_strategies(spec.simulation, profiles=volume_profiles(spec)),
         spec.simulation,
     )
     metadata = {

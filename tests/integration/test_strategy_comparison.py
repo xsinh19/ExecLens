@@ -5,11 +5,14 @@ import pytest
 from pydantic import ValidationError
 
 from execlens.simulation.comparison import (
+    MAX_DECISIONS,
+    MAX_SIMULATED_SECONDS,
     ComparisonRequest,
     best_strategy,
     compare_strategies,
     ranked_strategies,
 )
+from execlens.simulation.simulator import SimulationConfig
 
 SMALL = {"session_seconds": 3_600, "horizon_seconds": 900, "trials": 3, "quantity": 5_000}
 
@@ -106,3 +109,39 @@ def test_low_liquidity_conclusions_do_not_crown_an_incomplete_strategy() -> None
     assert pov["mean_completion_ratio"] < 0.95
     assert "POV" not in result.conclusions[0]
     assert "left out of the ranking" in " ".join(result.conclusions)
+
+
+def test_each_trial_simulates_only_the_window_its_order_needs(comparison) -> None:  # type: ignore[no-untyped-def]
+    request = comparison.request
+    arrivals = comparison.orders.group_by("trial").agg(pl.col("arrival_timestamp").first())
+    for _, arrival in arrivals.iter_rows():
+        day = comparison.market.quotes.filter(pl.col("timestamp").dt.date() == arrival.date())
+        first, last = day["timestamp"].min(), day["timestamp"].max()
+        assert (arrival - first).total_seconds() >= request.lookback_seconds  # impact look-back
+        assert (last - arrival).total_seconds() >= request.horizon_seconds + 300  # markouts
+        assert (last - first).total_seconds() < request.window_seconds
+    # The window is wide enough for every markout of every fill.
+    for h in (10, 30, 60, 300):
+        assert (comparison.orders[f"markout_{h}s_unavailable_fills"] == 0).all()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"trials": 100, "horizon_seconds": 3_600}, "simulated seconds"),
+        ({"trials": 100, "simulation": SimulationConfig(slice_seconds=1.0)}, "strategy decisions"),
+    ],
+)
+def test_requests_over_the_work_budget_are_rejected(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ComparisonRequest(**overrides)  # type: ignore[arg-type]
+
+
+def test_the_budget_admits_the_documented_workloads() -> None:
+    largest = ComparisonRequest(trials=100)  # CLI maximum at the default 30-minute horizon
+    assert largest.trials * largest.window_seconds <= MAX_SIMULATED_SECONDS
+    assert largest.max_decisions <= MAX_DECISIONS
+    with pytest.raises(ValidationError):
+        SimulationConfig(slice_seconds=0.5)  # sub-second decisions are not supported

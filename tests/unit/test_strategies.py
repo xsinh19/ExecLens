@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import math
-from datetime import time
+from datetime import time, timedelta, timezone
 
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
-from execlens.data.schemas import FILL_SCHEMA, Side
-from execlens.simulation.base import (
-    MICROS,
-    MarketView,
-    ParentOrder,
-    allocate,
-    slice_boundaries,
-    to_epoch_us,
-)
+from execlens.data.schemas import FILL_SCHEMA, MICROS, Side, to_epoch_us
+from execlens.simulation.base import MarketView, ParentOrder, allocate, slice_boundaries
 from execlens.simulation.immediate import ImmediateStrategy
 from execlens.simulation.impact import ImpactModel
 from execlens.simulation.pov import PovStrategy
@@ -111,6 +105,23 @@ def test_parent_order_validation() -> None:
         order(horizon=0.0)
 
 
+def test_parent_order_from_a_table_row_is_validated_and_time_zone_safe() -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    row = {
+        "order_id": "O1",
+        "symbol": "SYN",
+        "side": "SELL",
+        "quantity": 500,
+        "arrival_timestamp": T0.astimezone(ist),  # same instant, different zone
+        "execution_horizon_seconds": 600.0,
+        "strategy": "TWAP",
+    }
+    parsed = ParentOrder.from_row(row)
+    assert parsed == ParentOrder("O1", "SYN", Side.SELL, 500, T0_US, 600.0)
+    with pytest.raises(ValidationError):
+        ParentOrder.from_row(row | {"side": "HOLD"})
+
+
 # --- market view: point-in-time lookups ---------------------------------------
 
 
@@ -154,11 +165,10 @@ def test_execution_price_starts_from_the_touch_and_adds_impact_against_the_order
     view = MarketView(quotes, trades)
     snap = view.snapshot(T0_US + 400 * MICROS, T0_US)
     model = ImpactModel()
-    buy_price, buy_impact = model.execution_price(Side.BUY, 1_000, snap)
-    sell_price, sell_impact = model.execution_price(Side.SELL, 1_000, snap)
-    assert buy_impact == sell_impact > 0
-    assert buy_price == pytest.approx(10.01 * (1 + buy_impact / 1e4))
-    assert sell_price == pytest.approx(9.99 * (1 - sell_impact / 1e4))
+    impact = model.impact_bps(1_000, snap.trailing_volume)
+    assert impact > 0
+    assert model.execution_price(Side.BUY, 1_000, snap) == pytest.approx(10.01 * (1 + impact / 1e4))
+    assert model.execution_price(Side.SELL, 1_000, snap) == pytest.approx(9.99 * (1 - impact / 1e4))
     no_quote = view.snapshot(T0_US - MICROS, T0_US)
     with pytest.raises(ValueError, match="without a quote"):
         model.execution_price(Side.BUY, 10, no_quote)

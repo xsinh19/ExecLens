@@ -9,14 +9,22 @@ from __future__ import annotations
 
 from datetime import time
 
+import numpy as np
 import polars as pl
 
-from execlens.data.schemas import Side
-from execlens.data.synthetic import DEFAULT_UNIVERSE, MarketConfig, generate_market
-from execlens.simulation.base import MICROS, MarketView, ParentOrder, to_epoch_us
+from execlens.data.schemas import MICROS, Side, to_epoch_us
+from execlens.data.synthetic import generate_market, generate_orders
+from execlens.services.datasets import preset, volume_profiles
+from execlens.simulation.base import MarketView, ParentOrder
 from execlens.simulation.impact import ImpactModel
 from execlens.simulation.pov import PovStrategy
-from execlens.simulation.simulator import SimulationConfig, simulate_order
+from execlens.simulation.simulator import (
+    SimulationConfig,
+    build_strategies,
+    market_views,
+    simulate_order,
+    simulate_orders,
+)
 from execlens.simulation.twap import TwapStrategy
 from execlens.simulation.vwap import VolumeProfile, VwapStrategy
 from factories import T0, quotes_frame, trades_frame
@@ -70,14 +78,32 @@ def test_vwap_schedule_is_fixed_at_arrival_and_ignores_same_session_volume() -> 
     ]
 
 
-def test_historical_profile_ignores_the_traded_session() -> None:
-    instrument = DEFAULT_UNIVERSE[0]
-    profile = VolumeProfile.from_history(instrument, session_seconds=23_400, seed=3)
-    # Whatever the traded session looks like (any market seed), the profile is
-    # built from its own independent history stream.
-    for market_seed in (1, 2):
-        generate_market(MarketConfig(universe=(instrument,), seed=market_seed))
-        assert VolumeProfile.from_history(instrument, session_seconds=23_400, seed=3) == profile
+def test_dataset_vwap_schedules_ignore_the_traded_sessions_volume() -> None:
+    # End to end through the dataset service: re-draw every trade size of the
+    # traded sessions. VWAP child sizes and times must not move (prices may:
+    # impact reads volume that has already printed).
+    spec = preset("sample")
+    market = generate_market(spec.market)
+    orders = generate_orders(spec.market, spec.orders).filter(pl.col("strategy") == "VWAP")
+    rng = np.random.default_rng(0)
+    perturbed = market.trades.with_columns(
+        pl.col("size") * pl.Series(rng.integers(1, 50, market.trades.height))
+    )
+
+    def schedules(label: str, trades: pl.DataFrame) -> list[tuple[str, int, int]]:
+        views = market_views(market.quotes, trades, spec.simulation)
+        strategies = build_strategies(
+            spec.simulation, profiles=volume_profiles(spec), hindsight_markets=views
+        )
+        labelled = orders.with_columns(pl.lit(label).alias("strategy"))
+        executions = simulate_orders(labelled, views, strategies, spec.simulation)
+        return [(f.order_id, f.timestamp_us, f.quantity) for e in executions for f in e.fills]
+
+    assert orders.height >= 30
+    assert schedules("VWAP", perturbed) == schedules("VWAP", market.trades)
+    # Control: the hindsight oracle, which does read realised volume, notices
+    # the same perturbation, so the check above is able to fail.
+    assert schedules("ORACLE_VWAP", perturbed) != schedules("ORACLE_VWAP", market.trades)
 
 
 def test_scheduled_strategies_see_only_past_quotes_when_pricing() -> None:

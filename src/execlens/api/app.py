@@ -50,7 +50,9 @@ def create_app(
                 stale_quote_tolerance_seconds=settings.stale_quote_tolerance_seconds
             )
             result = analyze_directory(settings.data_dir, config)
-        app.state.execlens = ApiState(analysis=result, source=settings.data_dir.as_posix())
+        app.state.execlens = ApiState(
+            analysis=result, dataset_name=settings.data_dir.resolve().name
+        )
         yield
 
     app = FastAPI(

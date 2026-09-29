@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import math
 import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
@@ -54,13 +55,12 @@ import numpy.typing as npt
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from execlens.data.schemas import ORDER_SCHEMA, QUOTE_SCHEMA, TRADE_SCHEMA
+from execlens.data.schemas import MICROS, ORDER_SCHEMA, QUOTE_SCHEMA, TRADE_SCHEMA, to_epoch_us
 
 TRADING_DAY_SECONDS: Final = 23_400
 SESSION_OPEN_UTC: Final = time(14, 30)
 DEFAULT_START_DATE: Final = date(2026, 1, 5)
 PROFILE_NOISE_BUCKET_SECONDS: Final = 900
-MICROS: Final = 1_000_000
 
 # Independent random streams.
 _STREAM_MARKET: Final = 1
@@ -280,11 +280,6 @@ def _mean_one_lognormal(rng: np.random.Generator, sigma: float, size: int) -> Fl
     return np.exp(sigma * rng.standard_normal(size) - 0.5 * sigma * sigma)
 
 
-def _to_epoch_us(ts: datetime) -> int:
-    delta = ts - datetime(1970, 1, 1, tzinfo=UTC)
-    return (delta.days * 86_400 + delta.seconds) * MICROS + delta.microseconds
-
-
 def trade_intensity(
     scenario: Scenario, session_seconds: int, rng: np.random.Generator
 ) -> FloatArray:
@@ -304,11 +299,19 @@ def trade_intensity(
 
 
 def _trade_arrivals(
-    scenario: Scenario, session_seconds: int, rng: np.random.Generator
+    scenario: Scenario,
+    session_seconds: int,
+    rng: np.random.Generator,
+    window: tuple[int, int] | None = None,
 ) -> tuple[IntArray, IntArray]:
-    """Trade offsets from the open (microseconds, sorted) and sizes (shares)."""
-    counts = rng.poisson(trade_intensity(scenario, session_seconds, rng))
-    seconds = np.repeat(np.arange(session_seconds, dtype=np.int64), counts)
+    """Trade offsets from the open (microseconds, sorted) and sizes (shares).
+
+    With ``window = (start, end)`` only seconds ``[start, end)`` of the session
+    are drawn, at the session's own time-of-day intensity.
+    """
+    start, end = window or (0, session_seconds)
+    counts = rng.poisson(trade_intensity(scenario, session_seconds, rng)[start:end])
+    seconds = np.repeat(np.arange(start, end, dtype=np.int64), counts)
     offsets = seconds * MICROS + rng.integers(0, MICROS, size=seconds.size, dtype=np.int64)
     offsets.sort(kind="stable")
     sizes = np.maximum(
@@ -336,12 +339,26 @@ def _simulate_session(
     session_seconds: int,
     start_price: float,
     rng: np.random.Generator,
+    window: tuple[int, int] | None = None,
 ) -> _SessionMarket:
-    session_us = session_seconds * MICROS
-    n_updates = int(rng.poisson(scenario.quote_rate_per_second * session_seconds))
-    updates = np.sort(rng.integers(1, session_us, size=n_updates, dtype=np.int64))
-    quote_offsets = np.concatenate([np.zeros(1, dtype=np.int64), updates])
+    """One session, or only its seconds ``[start, end)`` when ``window`` is given.
 
+    A window is drawn from the same model as the full session: the first
+    quote's mid is the random walk's value ``start`` seconds after the open
+    (``start_price`` is the price at the open) and trades follow the session's
+    time-of-day intensity. The whole session is the window ``(0, session)``
+    and consumes exactly the same random numbers as before windows existed.
+    """
+    start, end = window or (0, session_seconds)
+    if not 0 <= start < end <= session_seconds:
+        raise ValueError(f"window {window} must lie within the {session_seconds} s session")
+    start_us, end_us = start * MICROS, end * MICROS
+    n_updates = int(rng.poisson(scenario.quote_rate_per_second * (end - start)))
+    updates = np.sort(rng.integers(start_us + 1, end_us, size=n_updates, dtype=np.int64))
+    quote_offsets = np.concatenate([np.full(1, start_us, dtype=np.int64), updates])
+
+    # The first quote's dt is its time since the open, so a window starts
+    # where the session's random walk would be at that time.
     dt = np.diff(quote_offsets, prepend=0).astype(np.float64) / MICROS
     mu = scenario.daily_drift / TRADING_DAY_SECONDS
     sigma = scenario.daily_volatility / math.sqrt(TRADING_DAY_SECONDS)
@@ -364,7 +381,7 @@ def _simulate_session(
     bid_size = lot * np.maximum(1, np.rint(lots_mean * _mean_one_lognormal(rng, 0.5, mid.size)))
     ask_size = lot * np.maximum(1, np.rint(lots_mean * _mean_one_lognormal(rng, 0.5, mid.size)))
 
-    trade_offsets, trade_size = _trade_arrivals(scenario, session_seconds, rng)
+    trade_offsets, trade_size = _trade_arrivals(scenario, session_seconds, rng, (start, end))
     prevailing = np.searchsorted(quote_offsets, trade_offsets, side="right") - 1
     u = rng.random(trade_offsets.size)
     frac_mid = scenario.midpoint_trade_fraction
@@ -398,10 +415,41 @@ class MarketData:
     trades: pl.DataFrame
 
 
+def _session_frames(symbol: str, session: _SessionMarket) -> tuple[pl.DataFrame, pl.DataFrame]:
+    quotes = pl.DataFrame(
+        {
+            "timestamp": session.quote_us,
+            "bid_price": session.bid,
+            "ask_price": session.ask,
+            "bid_size": session.bid_size,
+            "ask_size": session.ask_size,
+        }
+    ).with_columns(pl.lit(symbol).alias("symbol"))
+    trades = pl.DataFrame(
+        {"timestamp": session.trade_us, "price": session.trade_price, "size": session.trade_size}
+    ).with_columns(pl.lit(symbol).alias("symbol"))
+    return quotes, trades
+
+
+def _market_data(parts: list[tuple[pl.DataFrame, pl.DataFrame]]) -> MarketData:
+    quotes = (
+        pl.concat([q for q, _ in parts])
+        .with_columns(_epoch_us_to_utc("timestamp"))
+        .select(list(QUOTE_SCHEMA))
+        .sort("symbol", "timestamp", maintain_order=True)
+    )
+    trades = (
+        pl.concat([t for _, t in parts])
+        .with_columns(_epoch_us_to_utc("timestamp"))
+        .select(list(TRADE_SCHEMA))
+        .sort("symbol", "timestamp", maintain_order=True)
+    )
+    return MarketData(quotes=quotes, trades=trades)
+
+
 def generate_market(config: MarketConfig) -> MarketData:
     """Generate quotes and market trades for every instrument and session."""
-    quote_parts: list[pl.DataFrame] = []
-    trade_parts: list[pl.DataFrame] = []
+    parts: list[tuple[pl.DataFrame, pl.DataFrame]] = []
     opens = config.session_opens()
     for instrument in config.universe:
         scenario = instrument.params
@@ -409,43 +457,52 @@ def generate_market(config: MarketConfig) -> MarketData:
         for index, session_open in enumerate(opens):
             rng = _rng(config.seed, _STREAM_MARKET, instrument.symbol, index)
             session = _simulate_session(
-                scenario, _to_epoch_us(session_open), config.session_seconds, price, rng
+                scenario, to_epoch_us(session_open), config.session_seconds, price, rng
             )
             price = session.closing_mid
-            quote_parts.append(
-                pl.DataFrame(
-                    {
-                        "timestamp": session.quote_us,
-                        "bid_price": session.bid,
-                        "ask_price": session.ask,
-                        "bid_size": session.bid_size,
-                        "ask_size": session.ask_size,
-                    }
-                ).with_columns(pl.lit(instrument.symbol).alias("symbol"))
-            )
-            trade_parts.append(
-                pl.DataFrame(
-                    {
-                        "timestamp": session.trade_us,
-                        "price": session.trade_price,
-                        "size": session.trade_size,
-                    }
-                ).with_columns(pl.lit(instrument.symbol).alias("symbol"))
-            )
+            parts.append(_session_frames(instrument.symbol, session))
+    return _market_data(parts)
 
-    quotes = (
-        pl.concat(quote_parts)
-        .with_columns(_epoch_us_to_utc("timestamp"))
-        .select(list(QUOTE_SCHEMA))
-        .sort("symbol", "timestamp", maintain_order=True)
-    )
-    trades = (
-        pl.concat(trade_parts)
-        .with_columns(_epoch_us_to_utc("timestamp"))
-        .select(list(TRADE_SCHEMA))
-        .sort("symbol", "timestamp", maintain_order=True)
-    )
-    return MarketData(quotes=quotes, trades=trades)
+
+@dataclass(frozen=True)
+class SessionWindow:
+    """Seconds ``[start_seconds, end_seconds)`` after the open of one session."""
+
+    session_open: datetime
+    start_seconds: int
+    end_seconds: int
+
+
+def generate_windows(
+    instrument: Instrument,
+    windows: Sequence[SessionWindow],
+    *,
+    session_seconds: int = TRADING_DAY_SECONDS,
+    seed: int = 7,
+) -> MarketData:
+    """Quotes and trades for one instrument over parts of independent sessions.
+
+    Window ``k`` is drawn from the same model as session ``k`` of
+    :func:`generate_market` restricted to those seconds (same time-of-day
+    intensity; the price starts at the scenario's initial price at the open
+    and has random-walked to the window start), but only the requested
+    seconds are simulated, so the cost grows with the windows rather than
+    with whole sessions.
+    """
+    scenario = instrument.params
+    parts: list[tuple[pl.DataFrame, pl.DataFrame]] = []
+    for index, window in enumerate(windows):
+        rng = _rng(seed, _STREAM_MARKET, instrument.symbol, index)
+        session = _simulate_session(
+            scenario,
+            to_epoch_us(window.session_open),
+            session_seconds,
+            scenario.initial_price,
+            rng,
+            (window.start_seconds, window.end_seconds),
+        )
+        parts.append(_session_frames(instrument.symbol, session))
+    return _market_data(parts)
 
 
 def generate_orders(config: MarketConfig, order_config: OrderConfig) -> pl.DataFrame:
@@ -487,7 +544,7 @@ def generate_orders(config: MarketConfig, order_config: OrderConfig) -> pl.DataF
                         "symbol": [instrument.symbol] * n,
                         "side": side[order].tolist(),
                         "quantity": quantity[order].astype(np.int64),
-                        "arrival_timestamp": _to_epoch_us(session_open)
+                        "arrival_timestamp": to_epoch_us(session_open)
                         + np.floor(offset_s[order] * MICROS).astype(np.int64),
                         "execution_horizon_seconds": horizon[order],
                         "strategy": strategy[order].tolist(),

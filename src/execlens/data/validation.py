@@ -56,10 +56,6 @@ class DataValidationError(ValueError):
         super().__init__(f"{len(self.issues)} data validation issue(s):\n{details}")
 
 
-def empty_frame(schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
-    return pl.DataFrame(schema=dict(schema))
-
-
 # ---------------------------------------------------------------------------
 # Schema conformance
 # ---------------------------------------------------------------------------

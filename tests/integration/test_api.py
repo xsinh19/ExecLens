@@ -37,6 +37,16 @@ def test_health_reports_the_loaded_dataset(client: TestClient, analysis: Analysi
     assert "SYN_NORMAL" in body["dataset"]["symbols"]
 
 
+def test_health_names_the_dataset_without_exposing_server_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXECLENS_DATA_DIR", str(SAMPLE_DIR))
+    with TestClient(create_app()) as test_client:
+        dataset = test_client.get("/health").json()["dataset"]
+    assert dataset["name"] == "sample"
+    assert str(SAMPLE_DIR.parent) not in str(dataset)
+
+
 def test_order_listing_paginates(client: TestClient, analysis: AnalysisResult) -> None:
     first = client.get("/api/v1/orders", params={"limit": 5}).json()
     second = client.get("/api/v1/orders", params={"limit": 5, "offset": 5}).json()
@@ -78,6 +88,7 @@ def test_order_detail_includes_fills(client: TestClient, analysis: AnalysisResul
     assert body["order_id"] == order_id
     assert len(body["fills"]) == analysis.fills_for(order_id).height
     assert sum(f["quantity"] for f in body["fills"]) == body["executed_quantity"]
+    assert {f["order_id"] for f in body["fills"]} == {order_id}
 
 
 def test_order_tca_values_come_from_the_analysis(
@@ -115,7 +126,15 @@ def test_unknown_order_returns_404(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    "params", [{"limit": 0}, {"limit": 5000}, {"offset": -1}, {"side": "HOLD"}, {"flagged": "x"}]
+    "params",
+    [
+        {"limit": 0},
+        {"limit": 5000},
+        {"offset": -1},
+        {"offset": 10**12},  # would overflow the frame slice
+        {"side": "HOLD"},
+        {"flagged": "x"},
+    ],
 )
 def test_invalid_query_parameters_return_422(client: TestClient, params: dict[str, object]) -> None:
     assert client.get("/api/v1/orders", params=params).status_code == 422
@@ -153,13 +172,40 @@ def test_simulation_oracle_is_marked_non_implementable(client: TestClient) -> No
         {"strategies": []},
         {"scenario": "crash"},
         {"participation_rate": 2},
+        {"unexpected_field": 1},
         {"strategies": ["TWAP", "TWAP"]},  # rejected by the domain model
+        {"trials": 50, "horizon_seconds": 14_400},  # over the simulation budget
     ],
 )
 def test_invalid_simulations_return_422(client: TestClient, payload: dict[str, object]) -> None:
     response = client.post("/api/v1/simulations", json=payload)
     assert response.status_code == 422
     assert "Traceback" not in response.text
+
+
+def test_domain_errors_use_the_standard_validation_format(client: TestClient) -> None:
+    response = client.post("/api/v1/simulations", json={"trials": 50, "horizon_seconds": 14_400})
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["loc"] == ["body"]
+    assert "request too large" in error["msg"]
+    assert "limit 250,000" in error["msg"]
+
+
+def test_simulations_beyond_the_concurrency_limit_get_503(client: TestClient) -> None:
+    slots = client.app.state.execlens.simulation_slots  # type: ignore[attr-defined]
+    held = 0
+    while slots.acquire(blocking=False):  # occupy every slot
+        held += 1
+    try:
+        response = client.post("/api/v1/simulations", json={"trials": 1})
+    finally:
+        for _ in range(held):
+            slots.release()
+    assert held == 2
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
+    assert client.post("/api/v1/simulations", json={"trials": 1}).status_code == 201
 
 
 def test_unknown_simulation_returns_404(client: TestClient) -> None:
