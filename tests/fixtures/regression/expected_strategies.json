@@ -1,0 +1,171 @@
+{
+  "order": {
+    "order_id": "REG-STRAT",
+    "symbol": "REG_LIQ",
+    "side": "BUY",
+    "quantity": 5000,
+    "offset_seconds": 600,
+    "horizon_seconds": 300.0
+  },
+  "profile": {
+    "bucket_seconds": 300,
+    "fractions": [
+      0.3,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.3
+    ]
+  },
+  "fills": {
+    "IMMEDIATE": [
+      {
+        "offset_us": 0,
+        "quantity": 5000,
+        "price": 100.09441381371872
+      }
+    ],
+    "TWAP": [
+      {
+        "offset_us": 0,
+        "quantity": 500,
+        "price": 100.05720715875273
+      },
+      {
+        "offset_us": 30000000,
+        "quantity": 500,
+        "price": 100.19760739828547
+      },
+      {
+        "offset_us": 60000000,
+        "quantity": 500,
+        "price": 100.18748038169777
+      },
+      {
+        "offset_us": 90000000,
+        "quantity": 500,
+        "price": 100.17788388949212
+      },
+      {
+        "offset_us": 120000000,
+        "quantity": 500,
+        "price": 100.21822071181167
+      },
+      {
+        "offset_us": 150000000,
+        "quantity": 500,
+        "price": 100.14853760921385
+      },
+      {
+        "offset_us": 180000000,
+        "quantity": 500,
+        "price": 100.16914340852156
+      },
+      {
+        "offset_us": 210000000,
+        "quantity": 500,
+        "price": 100.07973604570716
+      },
+      {
+        "offset_us": 240000000,
+        "quantity": 500,
+        "price": 100.07018818394916
+      },
+      {
+        "offset_us": 270000000,
+        "quantity": 500,
+        "price": 100.08062739414268
+      }
+    ],
+    "POV": [
+      {
+        "offset_us": 30000000,
+        "quantity": 790,
+        "price": 100.202132156459
+      },
+      {
+        "offset_us": 60000000,
+        "quantity": 999,
+        "price": 100.19470862928432
+      },
+      {
+        "offset_us": 90000000,
+        "quantity": 747,
+        "price": 100.18185935163791
+      },
+      {
+        "offset_us": 120000000,
+        "quantity": 669,
+        "price": 100.22107625264321
+      },
+      {
+        "offset_us": 150000000,
+        "quantity": 681,
+        "price": 100.15163427154326
+      },
+      {
+        "offset_us": 180000000,
+        "quantity": 538,
+        "price": 100.16985753803094
+      },
+      {
+        "offset_us": 210000000,
+        "quantity": 576,
+        "price": 100.08118294710798
+      }
+    ],
+    "VWAP": [
+      {
+        "offset_us": 0,
+        "quantity": 500,
+        "price": 100.05720715875273
+      },
+      {
+        "offset_us": 30000000,
+        "quantity": 500,
+        "price": 100.19760739828547
+      },
+      {
+        "offset_us": 60000000,
+        "quantity": 500,
+        "price": 100.18748038169777
+      },
+      {
+        "offset_us": 90000000,
+        "quantity": 500,
+        "price": 100.17788388949212
+      },
+      {
+        "offset_us": 120000000,
+        "quantity": 500,
+        "price": 100.21822071181167
+      },
+      {
+        "offset_us": 150000000,
+        "quantity": 500,
+        "price": 100.14853760921385
+      },
+      {
+        "offset_us": 180000000,
+        "quantity": 500,
+        "price": 100.16914340852156
+      },
+      {
+        "offset_us": 210000000,
+        "quantity": 500,
+        "price": 100.07973604570716
+      },
+      {
+        "offset_us": 240000000,
+        "quantity": 500,
+        "price": 100.07018818394916
+      },
+      {
+        "offset_us": 270000000,
+        "quantity": 500,
+        "price": 100.08062739414268
+      }
+    ]
+  }
+}
