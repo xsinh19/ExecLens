@@ -98,6 +98,7 @@ plugins = ["pydantic.mypy"]
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
 markers = ["slow: tests that take more than a few seconds"]
 filterwarnings = ["error"]
