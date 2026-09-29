@@ -43,6 +43,7 @@ from execlens.simulation.vwap import OracleVwapBenchmark, VolumeProfile
 from execlens.tca.engine import TcaConfig, run_tca
 
 IMPLEMENTABLE_STRATEGIES: Final = ("IMMEDIATE", "TWAP", "VWAP", "POV")
+MIN_COMPLETION: Final = 0.95
 EDGE_SECONDS: Final = 300
 MARKOUT_BUFFER_SECONDS: Final = 300
 _ARRIVAL_STREAM: Final = 99
@@ -129,21 +130,45 @@ def _summary(orders: pl.DataFrame, horizons: tuple[int, ...]) -> pl.DataFrame:
     )
 
 
+def ranked_strategies(summary: pl.DataFrame) -> pl.DataFrame:
+    """Implementable strategies that completed the order, cheapest first.
+
+    Cost covers executed shares only, so a strategy that left a material part
+    of the order unfilled is not "cheaper" than one that finished. Strategies
+    whose mean completion is below ``MIN_COMPLETION`` are excluded from the
+    ranking (if none qualifies, all implementable strategies are ranked).
+    """
+    real = summary.filter(pl.col("implementable") & pl.col("mean_arrival_cost_bps").is_not_null())
+    complete = real.filter(pl.col("mean_completion_ratio") >= MIN_COMPLETION)
+    return (complete if complete.height else real).sort("mean_arrival_cost_bps")
+
+
+def best_strategy(summary: pl.DataFrame) -> str | None:
+    ranked = ranked_strategies(summary)
+    return None if ranked.is_empty() else str(ranked["strategy"][0])
+
+
 def _conclusions(summary: pl.DataFrame, request: ComparisonRequest) -> tuple[str, ...]:
     """Data-driven, scenario-specific observations (no causal claims)."""
     real = summary.filter(pl.col("implementable") & pl.col("mean_arrival_cost_bps").is_not_null())
     if real.is_empty():
         return ("No strategy produced fills with valid arrival context in this run.",)
+    ranked = ranked_strategies(summary)
     notes: list[str] = []
-    best = real.row(0, named=True)
+    best = ranked.row(0, named=True)
     scope = f"{request.scenario} scenario, {request.side.value} {request.quantity:,} shares"
+    qualifier = (
+        f"among strategies completing >= {MIN_COMPLETION:.0%} of the order "
+        if ranked.height < real.height
+        else ""
+    )
     notes.append(
-        f"Lowest mean arrival cost ({scope}, {request.trials} trials): {best['strategy']} at "
-        f"{best['mean_arrival_cost_bps']:.2f} bps "
+        f"Lowest mean arrival cost {qualifier}({scope}, {request.trials} trials): "
+        f"{best['strategy']} at {best['mean_arrival_cost_bps']:.2f} bps "
         f"(95% CI +/- {best['arrival_cost_ci95_bps'] or 0.0:.2f} bps)."
     )
-    if real.height > 1:
-        runner = real.row(1, named=True)
+    if ranked.height > 1:
+        runner = ranked.row(1, named=True)
         gap = runner["mean_arrival_cost_bps"] - best["mean_arrival_cost_bps"]
         overlap = gap <= (best["arrival_cost_ci95_bps"] or 0.0) + (
             runner["arrival_cost_ci95_bps"] or 0.0
@@ -166,9 +191,11 @@ def _conclusions(summary: pl.DataFrame, request: ComparisonRequest) -> tuple[str
         )
     incomplete = real.filter(pl.col("mean_completion_ratio") < 0.999)
     for row in incomplete.iter_rows(named=True):
+        excluded = row["mean_completion_ratio"] < MIN_COMPLETION and ranked.height < real.height
         notes.append(
             f"{row['strategy']} completed only {row['mean_completion_ratio']:.0%} of the order "
-            "on average; its cost covers executed shares only."
+            "on average; its cost covers executed shares only"
+            + (", so it is left out of the ranking." if excluded else ".")
         )
     notes.append(
         "These results hold for this synthetic scenario and parameters only; "

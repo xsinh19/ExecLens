@@ -4,7 +4,12 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
-from execlens.simulation.comparison import ComparisonRequest, compare_strategies
+from execlens.simulation.comparison import (
+    ComparisonRequest,
+    best_strategy,
+    compare_strategies,
+    ranked_strategies,
+)
 
 SMALL = {"session_seconds": 3_600, "horizon_seconds": 900, "trials": 3, "quantity": 5_000}
 
@@ -76,3 +81,28 @@ def test_different_seed_changes_the_realisation() -> None:
 def test_invalid_requests_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         ComparisonRequest(**(SMALL | overrides))  # type: ignore[arg-type]
+
+
+def test_ranking_ignores_strategies_that_left_the_order_unfilled() -> None:
+    summary = pl.DataFrame(
+        {
+            "strategy": ["TWAP", "POV", "IMMEDIATE", "ORACLE_VWAP"],
+            "implementable": [True, True, True, False],
+            "mean_arrival_cost_bps": [5.0, 1.0, 9.0, 0.5],
+            "mean_completion_ratio": [1.0, 0.2, 1.0, 1.0],
+        }
+    )
+    assert ranked_strategies(summary)["strategy"].to_list() == ["TWAP", "IMMEDIATE"]
+    assert best_strategy(summary) == "TWAP"
+    everyone_incomplete = summary.with_columns(pl.lit(0.5).alias("mean_completion_ratio"))
+    assert best_strategy(everyone_incomplete) == "POV"
+
+
+def test_low_liquidity_conclusions_do_not_crown_an_incomplete_strategy() -> None:
+    result = compare_strategies(
+        ComparisonRequest(scenario="low_liquidity", quantity=20_000, horizon_seconds=900, trials=3)
+    )
+    pov = result.summary.filter(pl.col("strategy") == "POV").row(0, named=True)
+    assert pov["mean_completion_ratio"] < 0.95
+    assert "POV" not in result.conclusions[0]
+    assert "left out of the ranking" in " ".join(result.conclusions)
