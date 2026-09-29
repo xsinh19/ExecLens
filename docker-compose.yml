@@ -1,0 +1,34 @@
+# API on http://localhost:8000/docs and dashboard on http://localhost:8501.
+# Both serve the committed synthetic sample unless EXECLENS_DATA_DIR is set.
+services:
+  api:
+    build: .
+    image: execlens:latest
+    command: ["execlens", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      EXECLENS_DATA_DIR: ${EXECLENS_DATA_DIR:-data/sample}
+      EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS: ${EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS:-30}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  dashboard:
+    image: execlens:latest
+    command: ["execlens", "dashboard", "--host", "0.0.0.0", "--port", "8501"]
+    environment:
+      EXECLENS_DATA_DIR: ${EXECLENS_DATA_DIR:-data/sample}
+      EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS: ${EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS:-30}
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_started

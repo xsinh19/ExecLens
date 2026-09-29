@@ -47,3 +47,26 @@ jobs:
       # is run locally (execlens benchmark), not on every commit.
       - name: Smoke benchmark
         run: uv run execlens benchmark --smoke --no-api
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t execlens:ci .
+
+      - name: CLI smoke test (analyse the bundled sample)
+        run: docker run --rm execlens:ci execlens analyze --top 1
+
+      - name: API smoke test
+        run: |
+          docker run -d --name api -p 8000:8000 execlens:ci
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:8000/api/v1/orders?limit=1"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/v1/orders/NOPE)" = "404"
+          docker rm -f api

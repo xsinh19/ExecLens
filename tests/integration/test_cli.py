@@ -4,12 +4,23 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from execlens.cli import app
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "data" / "sample"
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rich fixes the width when the console is created (from COLUMNS, if set).
+
+    Use a wide console so tables and long paths are not wrapped, whatever the
+    test environment's terminal width.
+    """
+    monkeypatch.setattr("execlens.cli.console", Console(width=250))
 
 
 def test_analyze_prints_summary_and_writes_derived_tables(tmp_path: Path) -> None:
@@ -73,7 +84,6 @@ def test_simulate_compares_strategies() -> None:
             "2",
             "--oracle",
         ],
-        env={"COLUMNS": "250"},  # wide console so table cells are not folded
     )
     assert result.exit_code == 0, result.output
     assert "Lowest mean arrival cost" in result.output
