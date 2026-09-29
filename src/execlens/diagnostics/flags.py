@@ -8,9 +8,18 @@ robust to the heavy tails typical of execution costs::
 
     z = 0.6745 * (x - median(x)) / MAD(x),      MAD = median(|x - median(x)|)
 
-computed over all analysed orders where the metric is available. The default
-threshold is |z| >= 3.5. Statistical rules are skipped when fewer than
-``min_population`` orders have the metric, or when the MAD is zero (no
+The default threshold is |z| >= 3.5. The comparison group depends on what the
+rule asks:
+
+* **execution** rules ask "was this execution unusual *for this
+  instrument*?", so each order is compared with the orders in the same symbol
+  (its peer group) when at least ``min_population`` of them have the metric;
+  otherwise with all analysed orders. Comparing a wide-spread instrument's
+  orders with a liquid one's would only rediscover the instrument.
+* **context** rules ask "were market conditions unusual across the book?", so
+  they compare with all analysed orders.
+
+A rule is skipped when its comparison group is too small or has zero MAD (no
 spread to compare against). Rules with a natural scale (participation,
 completion) use absolute thresholds instead.
 
@@ -39,6 +48,7 @@ import polars as pl
 from execlens.tca.alignment import ContextStatus
 
 MAD_TO_Z = 0.6745
+ALL_ORDERS = "all analysed orders"
 
 
 class FlagCode(StrEnum):
@@ -89,6 +99,7 @@ class FlagConfig:
     high_participation: float = 0.25
     low_completion: float = 0.95
     markout_horizon_seconds: int = 60
+    peer_group: str | None = "symbol"
 
     def __post_init__(self) -> None:
         if self.z_threshold <= 0 or self.min_population < 3:
@@ -108,21 +119,55 @@ def _fmt(expr: pl.Expr, decimals: int = 1) -> pl.Expr:
     return expr.round(decimals).cast(pl.String)
 
 
-def _statistical_rule(
+def add_comparison(
     frame: pl.DataFrame,
-    column: str,
+    name: str,
+    values: pl.Expr,
     config: FlagConfig,
     *,
-    high: bool,
-    transform: pl.Expr | None = None,
-) -> pl.Expr:
-    """Boolean flag for |z| beyond the threshold in the adverse direction."""
-    if frame[column].drop_nulls().len() < config.min_population:
-        return pl.lit(False)
-    source = transform if transform is not None else pl.col(column)
-    z = robust_z(source)
-    breach = z >= config.z_threshold if high else z <= -config.z_threshold
-    return breach.fill_null(False)
+    peer_group: str | None,
+) -> pl.DataFrame:
+    """Add ``z_{name}`` / ``median_{name}`` / ``peers_{name}`` for one metric.
+
+    The comparison group is ``peer_group`` (e.g. the order's symbol) when that
+    group has at least ``min_population`` values, otherwise all rows. ``z`` is
+    null when the chosen group is too small or has zero MAD.
+    """
+    data = frame.with_columns(values.alias("_v"))
+    pooled = data["_v"].drop_nulls()
+    pooled_ok = pooled.len() >= config.min_population
+    pooled_median = pooled.median() if pooled.len() else None
+    pooled_mad = (pooled - pooled_median).abs().median() if pooled.len() else None
+    if peer_group is not None and peer_group in frame.columns:
+        data = data.with_columns(
+            pl.col("_v").count().over(peer_group).alias("_n"),
+            pl.col("_v").median().over(peer_group).alias("_group_median"),
+        ).with_columns(
+            (pl.col("_v") - pl.col("_group_median")).abs().median().over(peer_group).alias("_mad")
+        )
+        use_group = pl.col("_n") >= config.min_population
+        peers = pl.format("{} orders", pl.col(peer_group).cast(pl.String))
+    else:
+        data = data.with_columns(
+            pl.lit(0).alias("_n"),
+            pl.lit(None, pl.Float64).alias("_group_median"),
+            pl.lit(None, pl.Float64).alias("_mad"),
+        )
+        use_group = pl.lit(False)
+        peers = pl.lit(ALL_ORDERS)
+    median = pl.when(use_group).then(pl.col("_group_median")).otherwise(pl.lit(pooled_median))
+    mad = pl.when(use_group).then(pl.col("_mad")).otherwise(pl.lit(pooled_mad))
+    assessable = (use_group | pl.lit(pooled_ok)) & (mad > 0)
+    return data.with_columns(
+        pl.when(assessable).then(MAD_TO_Z * (pl.col("_v") - median) / mad).alias(f"z_{name}"),
+        median.alias(f"median_{name}"),
+        pl.when(use_group).then(peers).otherwise(pl.lit(ALL_ORDERS)).alias(f"peers_{name}"),
+    ).drop("_v", "_n", "_group_median", "_mad")
+
+
+def _breach(name: str, config: FlagConfig, *, high: bool) -> pl.Expr:
+    z = pl.col(f"z_{name}")
+    return (z >= config.z_threshold if high else z <= -config.z_threshold).fill_null(False)
 
 
 def flag_orders(
@@ -146,51 +191,56 @@ def flag_orders(
         pl.col("_stale_fills").fill_null(0), pl.col("_missing_fills").fill_null(0)
     )
     mid_markout = f"mid_markout_{h}s_bps"
-    log_volume_rate = pl.col("market_volume_per_minute").log1p()
+    peer = config.peer_group
+    comparisons = [
+        ("arrival_cost", pl.col("arrival_cost_bps"), peer),
+        ("vwap_cost", pl.col("vwap_cost_bps"), peer),
+        ("effective_spread", pl.col("effective_spread_bps"), peer),
+        ("mid_markout", pl.col(mid_markout), peer),
+        ("volatility", pl.col("pre_arrival_volatility_bps"), None),
+        ("arrival_spread", pl.col("arrival_spread_bps"), None),
+        ("volume_rate", pl.col("market_volume_per_minute").log1p(), None),
+    ]
+    for name, values, group in comparisons:
+        frame = add_comparison(frame, name, values, config, peer_group=group)
 
-    def median(column: str) -> pl.Expr:
-        return pl.col(column).median()
+    def execution_reason(label: str, column: str, name: str) -> pl.Expr:
+        return pl.format(
+            "{} {} bps is unusually high compared with {} (median {} bps, robust z {}).",
+            pl.lit(label),
+            _fmt(pl.col(column)),
+            pl.col(f"peers_{name}"),
+            _fmt(pl.col(f"median_{name}")),
+            _fmt(pl.col(f"z_{name}")),
+        )
 
     rules: list[tuple[FlagCode, pl.Expr, pl.Expr]] = [
         (
             FlagCode.HIGH_ARRIVAL_COST,
-            _statistical_rule(frame, "arrival_cost_bps", config, high=True)
-            & (pl.col("arrival_cost_bps") > 0),
-            pl.format(
-                "Arrival cost {} bps is unusually high (median of analysed orders {} bps).",
-                _fmt(pl.col("arrival_cost_bps")),
-                _fmt(median("arrival_cost_bps")),
-            ),
+            _breach("arrival_cost", config, high=True) & (pl.col("arrival_cost_bps") > 0),
+            execution_reason("Arrival cost", "arrival_cost_bps", "arrival_cost"),
         ),
         (
             FlagCode.HIGH_VWAP_COST,
-            _statistical_rule(frame, "vwap_cost_bps", config, high=True)
-            & (pl.col("vwap_cost_bps") > 0),
-            pl.format(
-                "Cost versus interval VWAP {} bps is unusually high (median {} bps).",
-                _fmt(pl.col("vwap_cost_bps")),
-                _fmt(median("vwap_cost_bps")),
-            ),
+            _breach("vwap_cost", config, high=True) & (pl.col("vwap_cost_bps") > 0),
+            execution_reason("Cost versus interval VWAP", "vwap_cost_bps", "vwap_cost"),
         ),
         (
             FlagCode.HIGH_EFFECTIVE_SPREAD,
-            _statistical_rule(frame, "effective_spread_bps", config, high=True)
-            & (pl.col("effective_spread_bps") > 0),
-            pl.format(
-                "Effective spread {} bps is unusually high (median {} bps).",
-                _fmt(pl.col("effective_spread_bps")),
-                _fmt(median("effective_spread_bps")),
-            ),
+            _breach("effective_spread", config, high=True) & (pl.col("effective_spread_bps") > 0),
+            execution_reason("Effective spread", "effective_spread_bps", "effective_spread"),
         ),
         (
             FlagCode.ADVERSE_MARKOUT,
-            _statistical_rule(frame, mid_markout, config, high=False) & (pl.col(mid_markout) < 0),
+            _breach("mid_markout", config, high=False) & (pl.col(mid_markout) < 0),
             pl.format(
-                "Mid price moved {} bps against the order within {} s of its fills "
-                "(median {} bps).",
+                "Mid price moved {} bps against the order within {} s of its fills; unusual "
+                "compared with {} (median {} bps, robust z {}).",
                 _fmt(pl.col(mid_markout).abs()),
                 pl.lit(str(h)),
-                _fmt(median(mid_markout)),
+                pl.col("peers_mid_markout"),
+                _fmt(pl.col("median_mid_markout")),
+                _fmt(pl.col("z_mid_markout")),
             ),
         ),
         (
@@ -213,32 +263,32 @@ def flag_orders(
         ),
         (
             FlagCode.HIGH_VOLATILITY,
-            _statistical_rule(frame, "pre_arrival_volatility_bps", config, high=True),
+            _breach("volatility", config, high=True),
             pl.format(
                 "Execution coincided with elevated short-term volatility: {} bps per 10 s "
-                "before arrival (median {} bps).",
+                "before arrival (median of all orders {} bps).",
                 _fmt(pl.col("pre_arrival_volatility_bps"), 2),
-                _fmt(median("pre_arrival_volatility_bps"), 2),
+                _fmt(pl.col("median_volatility"), 2),
             ),
         ),
         (
             FlagCode.WIDE_SPREAD,
-            _statistical_rule(frame, "arrival_spread_bps", config, high=True),
+            _breach("arrival_spread", config, high=True),
             pl.format(
-                "Execution coincided with a wide quoted spread at arrival: {} bps (median {} bps).",
+                "Execution coincided with a wide quoted spread at arrival: {} bps "
+                "(median of all orders {} bps).",
                 _fmt(pl.col("arrival_spread_bps")),
-                _fmt(median("arrival_spread_bps")),
+                _fmt(pl.col("median_arrival_spread")),
             ),
         ),
         (
             FlagCode.LOW_LIQUIDITY,
-            _statistical_rule(
-                frame, "market_volume_per_minute", config, high=False, transform=log_volume_rate
-            ),
+            _breach("volume_rate", config, high=False),
             pl.format(
-                "Execution coincided with thin trading: {} shares/min in its interval (median {}).",
+                "Execution coincided with thin trading: {} shares/min in its interval "
+                "(median of all orders {}).",
                 _fmt(pl.col("market_volume_per_minute"), 0),
-                _fmt(median("market_volume_per_minute"), 0),
+                _fmt(pl.col("median_volume_rate").exp() - 1, 0),
             ),
         ),
         (
@@ -292,7 +342,11 @@ def flag_orders(
             pl.col("flags").list.len().alias("n_flags"),
             (pl.col("flags").list.len() > 0).alias("is_flagged"),
         )
-        .drop("_stale_fills", "_missing_fills")
+        .drop(
+            "_stale_fills",
+            "_missing_fills",
+            *[f"{kind}_{name}" for name, _, _ in comparisons for kind in ("z", "median", "peers")],
+        )
     )
 
 

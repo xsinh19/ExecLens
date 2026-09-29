@@ -126,8 +126,12 @@ def test_favourable_outliers_are_not_flagged() -> None:
 
 def test_reason_text_states_value_and_comparison() -> None:
     row = flags_of(with_row(base_orders(), 7, arrival_cost_bps=60.0), "O07")
+    # 30 costs: one 60, the rest 3..7 around 5 -> median 5, MAD 1,
+    # z = 0.6745 * (60 - 5) / 1 = 37.1. There is no symbol column, so the
+    # comparison is with all analysed orders.
     assert row["flag_reasons"] == [
-        "Arrival cost 60.0 bps is unusually high (median of analysed orders 5.0 bps)."
+        "Arrival cost 60.0 bps is unusually high compared with all analysed orders "
+        "(median 5.0 bps, robust z 37.1)."
     ]
     row = flags_of(with_row(base_orders(), 7, participation_rate=0.4), "O07")
     assert row["flag_reasons"] == [
@@ -187,3 +191,60 @@ def test_flag_config_validation() -> None:
         FlagConfig(z_threshold=0)
     with pytest.raises(ValueError, match="thresholds"):
         FlagConfig(low_completion=1.5)
+
+
+def two_instruments() -> pl.DataFrame:
+    """A cheap instrument (50 orders) and a uniformly expensive one (20 orders).
+
+    As in the real book, the expensive instrument is the minority, so a pooled
+    comparison would treat every one of its orders as an outlier.
+    """
+    cheap = base_orders(50).with_columns(pl.lit("CHEAP").alias("symbol"))
+    wide = base_orders(20).with_columns(
+        pl.lit("WIDE").alias("symbol"),
+        (pl.col("order_id") + "W").alias("order_id"),
+        (pl.col("effective_spread_bps") + 40.0).alias("effective_spread_bps"),
+    )
+    return pl.concat([cheap, wide])
+
+
+def test_execution_flags_compare_orders_within_their_symbol() -> None:
+    frame = with_row(two_instruments(), 7, effective_spread_bps=12.0)  # CHEAP outlier
+    out = flag_orders(frame, empty_fills())
+    flagged = out.filter(pl.col("flags").list.contains("HIGH_EFFECTIVE_SPREAD"))
+    # Only the within-symbol outlier: the WIDE orders pay ~44 bps, but that is
+    # normal for WIDE, so they are not flagged.
+    assert flagged["order_id"].to_list() == ["O07"]
+    assert "compared with CHEAP orders" in flagged["flag_reasons"][0][0]
+
+
+def test_pooled_comparison_would_only_rediscover_the_instrument() -> None:
+    out = flag_orders(two_instruments(), empty_fills(), FlagConfig(peer_group=None))
+    flagged = out.filter(pl.col("flags").list.contains("HIGH_EFFECTIVE_SPREAD"))
+    assert set(flagged["symbol"]) == {"WIDE"}
+    assert flagged.height == 20
+
+
+def test_small_peer_groups_fall_back_to_all_orders() -> None:
+    few = base_orders(5).with_columns(
+        pl.lit("RARE").alias("symbol"),
+        (pl.col("order_id") + "R").alias("order_id"),
+    )
+    frame = pl.concat([two_instruments(), with_row(few, 2, effective_spread_bps=200.0)])
+    row = flags_of(frame, "O02R")
+    assert "HIGH_EFFECTIVE_SPREAD" in row["flags"]
+    assert "compared with all analysed orders" in row["flag_reasons"][0]
+
+
+def test_context_notes_compare_with_the_whole_book() -> None:
+    frame = two_instruments().with_columns(
+        pl.when(pl.col("symbol") == "WIDE")
+        .then(pl.col("arrival_spread_bps") + 40.0)
+        .otherwise(pl.col("arrival_spread_bps"))
+        .alias("arrival_spread_bps")
+    )
+    out = flag_orders(frame, empty_fills())
+    wide = out.filter(pl.col("symbol") == "WIDE")
+    # Wide spreads describe the market the order met, relative to the book.
+    assert wide["context_flags"].list.contains("WIDE_SPREAD").all()
+    assert not wide["is_flagged"].any()
