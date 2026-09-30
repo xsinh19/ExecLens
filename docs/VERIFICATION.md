@@ -5,9 +5,9 @@ Checked September 30, 2026 on Windows 11, Python 3.12.14.
 | Check | Result |
 |---|---|
 | Ruff lint | Passed |
-| Ruff formatting | 86 files already formatted |
+| Ruff formatting | All files already formatted |
 | Strict mypy | Passed, 47 source files |
-| Full pytest suite | 300 passed in 89.24 s |
+| Full pytest suite | 300 passed in 91.94 s |
 | TCA line coverage | 98.6% (348/353) |
 | Simulation line coverage | 99.4% (472/475) |
 | Diagnostics line coverage | 100% (124/124) |
@@ -37,10 +37,11 @@ recorded earlier in the same project session; this final pass reran the
 representative smoke benchmark rather than replacing it with a battery-mode
 measurement on a smaller dataset. The smoke result is not the resume speedup.
 
-Dashboard pages passed headless Streamlit AppTest checks. Earlier screenshots
-showed outdated flag counts and were excluded from publication; originals
-are preserved locally under ignored `data/derived/archived-screenshots/`.
-No browser connection was available to capture fresh screenshots.
+Dashboard pages passed headless Streamlit AppTest checks. The README
+screenshots in `docs/images/` were captured with Playwright (Chromium,
+1440 px wide, light theme) from the running dashboard on the committed sample
+after the final code changes; they show the per-symbol flag counts (33
+flagged, 13.8%) and rule descriptions.
 
 ## Container and CI configuration checks
 

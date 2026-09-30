@@ -30,14 +30,14 @@ All market records and fills are synthetic. Simulations run synchronously.
 
 ## Resume block
 
-The compact bullets retain the requested LaTeX structure. Exact one-line
-fit depends on the existing resume's font and available text width; that
-template was not supplied for compilation.
+The compact bullets retain the requested LaTeX structure. `\isep` is the
+item-spacing length from the resume template, and exact one-line fit depends
+on that template's font and text width.
 
 ```latex
 \item \textbf{Transaction Cost Analysis Platform} $|$ \emph{\underline{\href{https://github.com/xsinh19/ExecLens}{Project Link}}} \hfill [Sep 2026] \\
 
-\[-1.05cm]
+\vspace{-1.05cm}
 
 \begin{itemize}\itemsep \isep
 
@@ -47,7 +47,7 @@ template was not supplied for compilation.
 
 \item Accelerated TCA by \textbf{4.6$\times$} over a Python reference on \textbf{1.55M synthetic records} and \textbf{125K fills}.
 
-\[-0.3cm]
+\vspace{-0.3cm}
 
 \end{itemize}
 ```
