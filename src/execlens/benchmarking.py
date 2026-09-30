@@ -629,6 +629,13 @@ def render_markdown(results: dict[str, Any]) -> str:
                 ),
                 "```",
             ]
+            if single and single["median_s"] <= opt_s:
+                lines += [
+                    "",
+                    "> One thread was at least as fast as all threads in this run, so the "
+                    "extra threads did not pay off here (see *Reading the results honestly* "
+                    "for why this happens on the development laptop).",
+                ]
         for note in tca.get("notes", []):
             lines += ["", f"> Note: {note}"]
     api = results.get("api")

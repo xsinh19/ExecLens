@@ -67,7 +67,7 @@ hindsight access and is labelled `implementable = False` everywhere.
 
 | Module | Responsibility |
 |---|---|
-| `data/schemas.py` | Canonical column schemas, Pydantic record models, side sign |
+| `data/schemas.py` | Canonical column schemas, `Order`/`Fill` record models, side sign, exact UTC epoch conversion |
 | `data/validation.py` | Vectorised rule checks, `DataValidationError`, `ExecutionDataset` |
 | `data/synthetic.py` | Seeded Level-1 market (six scenarios), parent orders, prior-session volume profiles |
 | `data/loader.py` | Parquet persistence + provenance metadata |
@@ -78,12 +78,12 @@ hindsight access and is labelled `implementable = False` everywhere.
 | `tca/reference.py` | Loop-based oracle and benchmark baseline, plus `compare_to_reference` |
 | `tca/aggregation.py` | Portfolio statistics (median/mean/p5/p95, notional-weighted) |
 | `diagnostics/features.py` | Pre-arrival volatility/momentum, interval move, volume rate |
-| `diagnostics/flags.py` | Robust z-score rules, absolute thresholds, data-quality flags, context notes |
+| `diagnostics/flags.py` | Robust z-score rules within each symbol's peer group, absolute thresholds, data-quality flags, context notes |
 | `simulation/base.py` | `ParentOrder`, `MarketView`, `MarketSnapshot`, strategy interface, integer allocation |
 | `simulation/{immediate,twap,vwap,pov}.py` | The four algorithms (+ `OracleVwapBenchmark`) |
 | `simulation/impact.py` | Deterministic square-root temporary-impact fill model |
 | `simulation/simulator.py` | Decision loop, batch simulation, strategy factory |
-| `simulation/comparison.py` | Controlled strategy comparison and data-driven conclusions |
+| `simulation/comparison.py` | Controlled strategy comparison (per-trial market windows, work budget) and data-driven conclusions |
 | `services/datasets.py` | Dataset presets (`sample`, `demo`, `benchmark`) and generation |
 | `services/analysis.py` | TCA -> features -> flags -> summary, persistence of derived tables |
 | `benchmarking.py` | Equivalence-checked, interleaved, median-reported benchmarks |
@@ -136,6 +136,8 @@ multi-desk scale), [LIMITATIONS.md](LIMITATIONS.md) says so.
 | Loop-based reference implementation | A readable specification, an independent test oracle and an honest benchmark baseline. |
 | Seeded, stream-separated randomness | Same config + seed gives identical data; market, order and history streams never share draws. |
 | Flags split into issues vs context | Unusual executions are flagged; market conditions are reported as context ("coincided with"), never as causes. |
+| Execution flags compare within the symbol | A wide-spread instrument's orders all look expensive next to liquid names; comparing with the same symbol's orders flags the execution, not the instrument. Context notes still compare with the whole book. |
+| Simulations are budgeted | Each trial simulates only the window its order needs; requests over the work budget are rejected with the exact figures, and the API runs at most two at once. |
 
 ## Testing layers
 

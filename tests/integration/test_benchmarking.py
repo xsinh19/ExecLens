@@ -84,6 +84,21 @@ def test_changes_in_machine_speed_are_noted(monkeypatch: pytest.MonkeyPatch) -> 
     assert "> Note:" in bench.render_markdown({"tca": results})
 
 
+def test_rendering_points_out_when_threads_did_not_help(results: dict[str, Any]) -> None:
+    core = results["workloads"]["core_in_memory"]
+
+    def rendered(single_s: float) -> str:
+        single = core["optimized_single_thread"] | {"median_s": single_s}
+        workloads = results["workloads"] | {
+            "core_in_memory": core | {"optimized_single_thread": single}
+        }
+        return bench.render_markdown({"tca": results | {"workloads": workloads}})
+
+    multi_s = core["optimized"]["median_s"]
+    assert "extra threads did not pay off" in rendered(multi_s * 0.9)
+    assert "extra threads did not pay off" not in rendered(multi_s * 3)
+
+
 def test_repeats_must_be_positive() -> None:
     with pytest.raises(ValueError, match="repeats"):
         bench.run_tca_benchmark(SAMPLE_DIR, reference_repeats=0, enforce_scale=False)

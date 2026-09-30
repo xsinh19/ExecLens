@@ -111,8 +111,10 @@ def test_benchmarks_page_reads_the_results_file() -> None:
     results = json.loads((ROOT / "benchmarks" / "results.json").read_text(encoding="utf-8"))
     app = run_page("benchmarks")
     shown = {metric.label: metric.value for metric in app.metric}
-    speedup = results["tca"]["workloads"]["core_in_memory"]["speedup_median"]
-    assert shown["Measured speedup (core TCA)"] == f"{speedup:.1f}x"
+    core = results["tca"]["workloads"]["core_in_memory"]
+    assert shown["Measured speedup (core TCA)"] == f"{core['speedup_median']:.1f}x"
+    single = core["optimized_single_thread"]["median_s"]
+    assert shown["Polars median (1 thread)"] == f"{single:.3f} s"
 
 
 def test_benchmarks_page_without_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

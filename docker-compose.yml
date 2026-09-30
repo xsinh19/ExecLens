@@ -1,5 +1,8 @@
 # API on http://localhost:8000/docs and dashboard on http://localhost:8501.
-# Both serve the committed synthetic sample unless EXECLENS_DATA_DIR is set.
+# Both read ./data (mounted read-only) and serve the committed synthetic sample
+# unless EXECLENS_DATA_DIR names another dataset under data/, e.g.
+#   EXECLENS_DATA_DIR=data/generated/demo docker compose up
+# The two services are independent: the dashboard reads the dataset itself.
 services:
   api:
     build: .
@@ -8,6 +11,8 @@ services:
     environment:
       EXECLENS_DATA_DIR: ${EXECLENS_DATA_DIR:-data/sample}
       EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS: ${EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS:-30}
+    volumes:
+      - ./data:/app/data:ro
     ports:
       - "8000:8000"
     healthcheck:
@@ -22,13 +27,13 @@ services:
       start_period: 30s
 
   dashboard:
+    build: .
     image: execlens:latest
     command: ["execlens", "dashboard", "--host", "0.0.0.0", "--port", "8501"]
     environment:
       EXECLENS_DATA_DIR: ${EXECLENS_DATA_DIR:-data/sample}
       EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS: ${EXECLENS_STALE_QUOTE_TOLERANCE_SECONDS:-30}
+    volumes:
+      - ./data:/app/data:ro
     ports:
       - "8501:8501"
-    depends_on:
-      api:
-        condition: service_started

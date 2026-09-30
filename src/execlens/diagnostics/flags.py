@@ -78,10 +78,12 @@ def flag_category(code: FlagCode) -> str:
 
 
 FLAG_DESCRIPTIONS: dict[FlagCode, str] = {
-    FlagCode.HIGH_ARRIVAL_COST: "Arrival cost unusually high versus the analysed orders.",
-    FlagCode.HIGH_VWAP_COST: "Cost versus interval VWAP unusually high.",
-    FlagCode.HIGH_EFFECTIVE_SPREAD: "Effective spread paid unusually high.",
-    FlagCode.ADVERSE_MARKOUT: "Mid price moved unusually far against the order after its fills.",
+    FlagCode.HIGH_ARRIVAL_COST: "Arrival cost unusually high for the symbol.",
+    FlagCode.HIGH_VWAP_COST: "Cost versus interval VWAP unusually high for the symbol.",
+    FlagCode.HIGH_EFFECTIVE_SPREAD: "Effective spread paid unusually high for the symbol.",
+    FlagCode.ADVERSE_MARKOUT: (
+        "Mid price moved unusually far against the order after its fills, for the symbol."
+    ),
     FlagCode.HIGH_PARTICIPATION: "Order was a large share of market volume in its interval.",
     FlagCode.LOW_COMPLETION: "A material part of the order was not executed.",
     FlagCode.HIGH_VOLATILITY: "Execution coincided with elevated short-term volatility.",

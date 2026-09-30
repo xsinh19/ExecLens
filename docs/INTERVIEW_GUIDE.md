@@ -69,7 +69,7 @@ displayed sizes). ExecLens validates `bid <= ask`: locked markets are allowed,
 crossed markets are rejected as bad data. The simulator's fill model starts
 from the ask for buys and the bid for sells.
 
-**Source.** `data/schemas.py` (`Quote`), `simulation/impact.py`.
+**Source.** `data/validation.py` (quote rules), `simulation/impact.py`.
 
 ## 5. Midpoint
 
@@ -305,8 +305,8 @@ as Polars lazy frames: as-of joins, group-bys and expressions.
 **Deeper.** Lazy frames let Polars push projections down (read only the
 needed Parquet columns) and plan the joins. Formulas are small functions that
 return `pl.Expr`, reused everywhere. The same logic written as Python loops,
-the reference implementation, is roughly an order of magnitude slower on the
-benchmark dataset; see BENCHMARKS.md for the measured figure.
+the reference implementation, is several times slower on the benchmark
+dataset; BENCHMARKS.md has the measured figure, including a single-thread run.
 
 **Source.** `tca/engine.py`, `tca/metrics.py`.
 
@@ -315,11 +315,15 @@ benchmark dataset; see BENCHMARKS.md for the measured figure.
 **20 s.** Replace per-row Python loops with whole-column operations that run
 in compiled code. It is the main source of the speedup.
 
-**Deeper.** The reference does 5 binary searches per fill and a slice sum per
-order in the interpreter. The engine turns them into sorted-merge as-of joins
-and a running-total difference. Part of the gain is algorithmic (running
-totals versus slice sums) and part is parallelism (16 threads versus 1), and
-the benchmark page says so.
+**Deeper.** The reference does binary searches per fill and prefix-sum
+lookups per order, in the interpreter. The engine does the same work as
+sorted-merge as-of joins and running-total differences in compiled code. The
+algorithms match on purpose, so the speedup measures implementation, not a
+better algorithm. (A first version of the reference summed each interval's
+trades, which inflated the ratio; a review caught it and it was fixed.)
+Parallelism is measured separately with a one-thread run. It helps less
+than 16 logical CPUs suggest, because the joins are partitioned by symbol and
+the dataset has six.
 
 **Source.** `tca/reference.py` vs `tca/engine.py`, `docs/BENCHMARKS.md`.
 
@@ -356,8 +360,9 @@ responses, and it generates OpenAPI docs automatically (`/docs`).
 **Deeper.** The app factory analyses the dataset once at startup (lifespan)
 and indexes it, so order lookups are dictionary lookups. Endpoints: health,
 order list/detail/TCA, summary, POST/GET simulations. Errors are 404 for
-unknown ids, 422 for invalid input (including domain validation) and a
-generic 500 without a traceback. No formula lives in a route. Measured p95
+unknown ids, 422 for invalid input (domain validation errors use the same
+format as FastAPI's own), 503 with `Retry-After` when both simulation slots
+are busy, and a generic 500 without a traceback. No formula lives in a route. Measured p95
 latencies are in BENCHMARKS.md.
 
 **Source.** `api/app.py`, `api/routes/`, `api/schemas.py`.
@@ -367,9 +372,10 @@ latencies are in BENCHMARKS.md.
 **20 s.** Runtime validation from type hints. ExecLens uses it at the
 boundaries (API payloads, configs, record models), not for millions of rows.
 
-**Deeper.** Bulk validation is Polars expressions for speed. A test checks
-that the Pydantic record models and the frame validators reject the same
-invalid inputs. API schema field descriptions carry the sign conventions
+**Deeper.** Bulk validation is Polars expressions for speed. The `Order`
+and `Fill` record models are used where single records cross a boundary
+(simulator input, API output), and a test checks that they and the frame
+validators reject the same invalid inputs. API schema field descriptions carry the sign conventions
 into the OpenAPI docs.
 
 **Source.** `data/schemas.py`, `api/schemas.py`, `tests/unit/test_validation.py`.
@@ -394,17 +400,21 @@ and ≥100k fills: outputs checked equal first, then interleaved repeated runs,
 median reported. The machine, the power state and every run are recorded.
 
 **Deeper.** The honesty rules: identical inputs and outputs (compared column
-by column; any disagreement aborts); warm-up runs excluded; runs interleaved
-because the laptop throttles under sustained load; median, not minimum; memory
-measured in separate untimed runs; the scale enforced (the harness refuses
-undersized data). Two workloads: in-memory core and end-to-end from Parquet.
-Docs are generated from the JSON, and a test checks the README matches it.
+by column; any disagreement aborts); the same algorithm on both sides (binary
+search and prefix sums in the reference); warm-up runs excluded; runs
+interleaved across implementations and workloads because the laptop throttles
+under sustained load; median, not minimum; a one-thread engine run in a
+subprocess (`POLARS_MAX_THREADS=1`) to separate vectorisation from
+parallelism; memory measured in separate untimed runs; the scale enforced
+(the harness refuses undersized data). Two workloads: in-memory core and
+end-to-end from Parquet. Docs are generated from the JSON, and a test checks
+the README matches it.
 
 **Source.** `benchmarking.py`, `docs/BENCHMARKS.md`.
 
 ## 28. Testing
 
-**20 s.** Over 250 tests: hand-calculated formulas (BUY and SELL), no-look-ahead
+**20 s.** About 300 tests: hand-calculated formulas (BUY and SELL), no-look-ahead
 tests, edge cases, engine-versus-reference equivalence, a frozen regression
 dataset, API/CLI/dashboard integration, and ≥85% coverage enforced on the core
 packages.
@@ -451,7 +461,8 @@ results say nothing about profitability.
 
 **Deeper.** Be specific: fills are complete at touch plus impact; our prints
 are not on the tape; the VWAP profile is synthetic history; flags are
-statistical screens, not verdicts; conclusions are scenario-specific with
+statistical screens within a symbol's orders, not verdicts, and a symbol's
+orders still mix sizes and strategies; conclusions are scenario-specific with
 confidence intervals.
 
 **Source.** `docs/LIMITATIONS.md`.
@@ -463,8 +474,9 @@ child-order records, pre-trade cost models so flags compare against
 *expected* cost, a calibrated impact model, opportunity cost for unfilled
 shares, and production data pipelines with access control.
 
-**Deeper.** Also venue analysis and routing, peer-group benchmarks (by size,
-liquidity bucket and volatility regime), per-desk benchmark choice
+**Deeper.** Also venue analysis and routing, finer peer groups than
+ExecLens's per-symbol comparison (by size, liquidity bucket and volatility
+regime), per-desk benchmark choice
 (arrival/open/close/interval VWAP), regulatory reporting, and monitoring. The
 code structure would survive (formulas, as-of alignment, reference testing),
 but the data layer and the models would be replaced.
@@ -486,6 +498,15 @@ but the data layer and the models would be replaced.
   intervals and refuses to call a general winner.
 * **"What would you do with a quote stamped exactly at the fill?"** The spec
   says `<=`. In production, use exchange sequence numbers or a latency offset.
+* **"Why flag within a symbol?"** Compared with the whole book, every order in
+  a wide-spread name looks expensive, so the flags just rediscover the
+  instrument. Within the symbol, a flag means the execution was unusual for
+  that instrument. Market conditions (spread, volatility, thin trading) are
+  still compared book-wide, as context.
+* **"Could one API call take the server down?"** Each simulation trial
+  generates only the market window its order needs, a work budget rejects
+  oversized requests up front with the exact figures (422), and at most two
+  simulations run at once (503 with `Retry-After` beyond that).
 * **"How do you know your fast code is right?"** It must match a readable
   loop implementation to 1e-9 relative on every order-level column before any
   timing is taken, and it also matches hand calculations and a frozen

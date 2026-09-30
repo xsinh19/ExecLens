@@ -446,16 +446,33 @@ def benchmarks() -> None:
     env, data = tca["environment"], tca["dataset"]
     core = tca["workloads"].get("core_in_memory")
     if core:
-        a, b, c = st.columns(3)
-        a.metric("Measured speedup (core TCA)", f"{core['speedup_median']:.1f}x", border=True)
-        b.metric("Polars median", f"{core['optimized']['median_s']:.3f} s", border=True)
-        c.metric("Python reference median", f"{core['reference']['median_s']:.3f} s", border=True)
+        single = core.get("optimized_single_thread")
+        tiles = st.columns(4 if single else 3)
+        speedup = f"{core['speedup_median']:.1f}x"
+        tiles[0].metric("Measured speedup (core TCA)", speedup, border=True)
+        tiles[1].metric(
+            f"Polars median ({env['polars_threads']} threads)",
+            f"{core['optimized']['median_s']:.3f} s",
+            border=True,
+        )
+        if single:
+            tiles[2].metric("Polars median (1 thread)", f"{single['median_s']:.3f} s", border=True)
+        tiles[-1].metric(
+            "Python reference median", f"{core['reference']['median_s']:.3f} s", border=True
+        )
+    power = env.get("power") or {}
+    power_note = ""
+    if "on_battery" in power:
+        power_note = " On battery" if power["on_battery"] else " On AC power"
+        if "power_scheme" in power:
+            power_note += f", power scheme '{power['power_scheme']}'"
+        power_note += "."
     st.markdown(
         f"Dataset: **{data['quotes']:,} quotes + {data['trades']:,} trades** "
         f"({data['market_observations']:,} market observations), **{data['orders']:,} orders**, "
         f"**{data['fills']:,} fills**. Machine: {env['cpu']}, {env['logical_cpus']} logical "
         f"CPUs, {env['os']}, Python {env['python']}, Polars {env['polars']}. "
-        f"Measured {tca['generated_at']}."
+        f"Measured {tca['generated_at']}.{power_note}"
     )
     _plot(charts.runtime_bars(tca["workloads"], palette), "bench-runtime")
     rows = [

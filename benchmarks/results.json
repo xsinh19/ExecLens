@@ -1,6 +1,6 @@
 {
   "tca": {
-    "generated_at": "2026-09-29T21:19:40+00:00",
+    "generated_at": "2026-09-29T23:41:07+00:00",
     "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "python": "3.12.14",
@@ -9,7 +9,7 @@
       "memory_gb": 15.6,
       "power": {
         "on_battery": false,
-        "battery_percent": 65,
+        "battery_percent": 98,
         "power_scheme": "Silent"
       },
       "polars": "1.44.2",
@@ -38,70 +38,87 @@
         "description": "Order-level TCA from in-memory Polars frames (no I/O).",
         "reference": {
           "runs_s": [
-            7.815,
-            9.0445,
-            8.1868,
-            7.8595,
-            7.4579
+            3.4175,
+            3.5347,
+            3.2874,
+            3.3941,
+            3.3505
           ],
-          "median_s": 7.8595,
-          "min_s": 7.4579,
-          "max_s": 9.0445,
+          "median_s": 3.3941,
+          "min_s": 3.2874,
+          "max_s": 3.5347,
           "repetitions": 5,
-          "peak_rss_mb": 268.8
+          "peak_rss_mb": 285.3
         },
         "optimized": {
           "runs_s": [
-            0.8438,
-            0.7973,
-            0.6873,
-            0.6009,
-            0.6491
+            0.6679,
+            0.8189,
+            0.4172,
+            1.1429,
+            0.7376
           ],
-          "median_s": 0.6873,
-          "min_s": 0.6009,
-          "max_s": 0.8438,
+          "median_s": 0.7376,
+          "min_s": 0.4172,
+          "max_s": 1.1429,
           "repetitions": 5,
-          "peak_rss_mb": 270.0
+          "peak_rss_mb": 168.7
         },
-        "speedup_median": 11.44
+        "speedup_median": 4.602,
+        "optimized_single_thread": {
+          "runs_s": [
+            0.6789,
+            0.6669,
+            0.7257,
+            0.6908,
+            0.7209
+          ],
+          "median_s": 0.6908,
+          "min_s": 0.6669,
+          "max_s": 0.7257,
+          "repetitions": 5,
+          "peak_rss_mb": null,
+          "threads": 1
+        },
+        "speedup_single_thread_median": 4.913
       },
       "end_to_end_parquet": {
         "description": "Order-level TCA starting from Parquet files on disk (includes reading).",
         "reference": {
           "runs_s": [
-            5.2992,
-            4.3291,
-            4.4591,
-            4.3591,
-            4.4841
+            3.4036,
+            5.3561,
+            3.5652,
+            3.2589,
+            3.4431
           ],
-          "median_s": 4.4591,
-          "min_s": 4.3291,
-          "max_s": 5.2992,
+          "median_s": 3.4431,
+          "min_s": 3.2589,
+          "max_s": 5.3561,
           "repetitions": 5,
-          "peak_rss_mb": 243.9
+          "peak_rss_mb": 285.1
         },
         "optimized": {
           "runs_s": [
-            0.3737,
-            0.3581,
-            0.3639,
-            0.3579,
-            0.367
+            1.1576,
+            1.0042,
+            0.3689,
+            0.6139,
+            1.0884
           ],
-          "median_s": 0.3639,
-          "min_s": 0.3579,
-          "max_s": 0.3737,
+          "median_s": 1.0042,
+          "min_s": 0.3689,
+          "max_s": 1.1576,
           "repetitions": 5,
-          "peak_rss_mb": 152.9
+          "peak_rss_mb": 101.4
         },
-        "speedup_median": 12.25
+        "speedup_median": 3.429
       }
-    }
+    },
+    "notes": []
   },
   "api": {
-    "generated_at": "2026-09-29T21:40:47+00:00",
+    "generated_at": "2026-09-29T23:41:32+00:00",
     "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "python": "3.12.14",
@@ -110,7 +127,7 @@
       "memory_gb": 15.6,
       "power": {
         "on_battery": false,
-        "battery_percent": 92,
+        "battery_percent": 98,
         "power_scheme": "Silent"
       },
       "polars": "1.44.2",
@@ -120,49 +137,49 @@
     },
     "dataset": "data/generated/benchmark",
     "orders": 5400,
-    "startup_seconds": 4.53,
+    "startup_seconds": 15.96,
     "requests_per_endpoint": 300,
     "warmup_requests": 30,
     "client": "single sequential keep-alive HTTP/1.1 client (http.client) on localhost",
     "endpoints": [
       {
         "endpoint": "/health",
-        "p50_ms": 2.896,
-        "p95_ms": 5.898,
-        "p99_ms": 9.652,
-        "mean_ms": 3.223,
+        "p50_ms": 2.099,
+        "p95_ms": 2.781,
+        "p99_ms": 3.059,
+        "mean_ms": 2.152,
         "target_p95_ms": 50
       },
       {
         "endpoint": "/api/v1/orders?limit=100",
-        "p50_ms": 5.282,
-        "p95_ms": 10.803,
-        "p99_ms": 21.134,
-        "mean_ms": 6.09,
+        "p50_ms": 7.389,
+        "p95_ms": 8.729,
+        "p99_ms": 9.445,
+        "mean_ms": 7.544,
         "target_p95_ms": "-"
       },
       {
         "endpoint": "/api/v1/orders/{order_id}",
-        "p50_ms": 4.387,
-        "p95_ms": 7.283,
-        "p99_ms": 9.286,
-        "mean_ms": 4.62,
+        "p50_ms": 2.696,
+        "p95_ms": 3.89,
+        "p99_ms": 4.352,
+        "mean_ms": 2.793,
         "target_p95_ms": 300
       },
       {
         "endpoint": "/api/v1/orders/{order_id}/tca",
-        "p50_ms": 4.083,
-        "p95_ms": 6.94,
-        "p99_ms": 11.733,
-        "mean_ms": 4.404,
+        "p50_ms": 2.75,
+        "p95_ms": 3.808,
+        "p99_ms": 4.146,
+        "mean_ms": 2.849,
         "target_p95_ms": 300
       },
       {
         "endpoint": "/api/v1/summary",
-        "p50_ms": 2.486,
-        "p95_ms": 4.486,
-        "p99_ms": 6.069,
-        "mean_ms": 2.784,
+        "p50_ms": 1.803,
+        "p95_ms": 2.255,
+        "p99_ms": 2.844,
+        "mean_ms": 1.814,
         "target_p95_ms": "-"
       }
     ]

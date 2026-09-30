@@ -1,15 +1,16 @@
 # Data model
 
-ExecLens works on four tables. Each exists twice in the code, with the same
-rules:
+ExecLens works on four tables, defined in `src/execlens/data/schemas.py`:
 
 * **Polars column schemas** (`QUOTE_SCHEMA`, `TRADE_SCHEMA`, `ORDER_SCHEMA`,
-  `FILL_SCHEMA` in `src/execlens/data/schemas.py`) for bulk processing;
-* **Pydantic models** (`Quote`, `MarketTrade`, `Order`, `Fill`, same module)
-  for records crossing an external boundary one at a time.
+  `FILL_SCHEMA`) for all bulk processing, enforced by the frame validators in
+  `data/validation.py`;
+* **Pydantic models** for the two records that cross a boundary one at a
+  time: `Order` (a parent order handed to the simulator,
+  `ParentOrder.from_row`) and `Fill` (fills returned by the API).
 
-`tests/unit/test_validation.py` checks that both representations reject the
-same invalid inputs.
+`tests/unit/test_validation.py` checks that the frame validators and the
+Pydantic models reject the same invalid orders and fills.
 
 ## Conventions
 

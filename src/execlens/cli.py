@@ -51,6 +51,11 @@ app = typer.Typer(
 console = Console()
 
 
+def _log(message: str) -> None:
+    """Progress lines verbatim: "[core_in_memory] ..." is text, not Rich markup."""
+    console.print(message, markup=False, highlight=False)
+
+
 def _cell(value: object) -> str:
     if value is None:
         return "-"
@@ -404,7 +409,10 @@ def benchmark(
     ] = True,
     smoke: Annotated[
         bool,
-        typer.Option(help="Quick run on the small sample dataset; prints results, writes nothing."),
+        typer.Option(
+            help=f"Quick run on {DEFAULT_DATA_DIR} (relative to the current directory, so run "
+            "it from the repository root); prints results, writes nothing."
+        ),
     ] = False,
 ) -> None:
     """Benchmark the loop-based reference TCA against the vectorised Polars engine."""
@@ -430,11 +438,11 @@ def benchmark(
                 reference_repeats=reference_repeats,
                 optimized_repeats=optimized_repeats,
                 enforce_scale=not smoke,
-                log=console.print,
+                log=_log,
             )
         }
         if api:
-            results["api"] = run_api_benchmark(data, log=console.print)
+            results["api"] = run_api_benchmark(data, log=_log)
     except BenchmarkError as exc:
         console.print(f"[red]Benchmark aborted:[/red] {exc}")
         raise typer.Exit(code=1) from exc

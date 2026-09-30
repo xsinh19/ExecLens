@@ -43,6 +43,11 @@ limitations a reader should know before trusting any number.
 * **The VWAP profile is synthetic history.** It averages independently
   generated prior sessions of the same scenario. It is realistic in spirit,
   but it comes from the same model that generates the traded session.
+* **Comparisons simulate windows, not whole days.** Each comparison trial
+  generates only the market around its order (the impact look-back, the
+  horizon and the markout buffer), starting from the scenario's opening
+  price. Windows follow the same model as full sessions, but consecutive
+  trials are independent days rather than one continuous price path.
 * **Scenario-specific conclusions.** Strategy rankings depend on the
   scenario, size, horizon, impact coefficient and number of trials. With
   20 trials the confidence intervals are often wide. The tool reports them
@@ -61,11 +66,14 @@ limitations a reader should know before trusting any number.
   need context for every fill. Orders with many fills are therefore slightly
   more likely to be excluded, and portfolio statistics report how many orders
   contributed.
-* **Flags are statistical screens, not verdicts.** Robust z-scores against
-  the analysed book flag unusual values. They describe co-occurrence (for
-  example, "execution coincided with a wide spread") and never establish
-  cause. With fewer than 20 orders per metric the statistical rules are
-  switched off.
+* **Flags are statistical screens, not verdicts.** Robust z-scores flag
+  values that are unusual among the other orders in the same symbol (or the
+  whole book when a symbol has fewer than 20 orders with the metric; with
+  fewer than 20 in total the statistical rules are switched off). A peer
+  group of one symbol still mixes order sizes, horizons and strategies, so an
+  order can be "unusual" simply for being large. Context notes describe
+  co-occurrence (for example, "execution coincided with a wide spread") and
+  never establish cause.
 * **Diagnostic features are simple.** Volatility is the standard deviation of
   10-second mid returns over the five minutes before arrival. Momentum and the
   interval move are single-period returns.
@@ -78,7 +86,10 @@ limitations a reader should know before trusting any number.
   in-memory store and are lost on restart).
 * **API security.** There is no authentication, rate limiting or TLS. It is
   meant for local use and demos. POST `/api/v1/simulations` runs
-  synchronously with bounded parameters (50 trials at most).
+  synchronously within a work budget (at most 250,000 simulated market
+  seconds and 100,000 strategy decisions per request, 50 trials at most),
+  and at most two simulations run at once; others get 503 with
+  `Retry-After`.
 * **Benchmarks are machine-specific.** They were measured on one laptop,
   whose power profile changes clock speeds under sustained load; see
   [BENCHMARKS.md](BENCHMARKS.md) for the method and caveats.
@@ -97,9 +108,9 @@ limitations a reader should know before trusting any number.
   sequence numbers, a trading calendar, corporate actions and symbology.
 * Broker / OMS / EMS execution records (FIX drop copies) with venue, order
   type, limit price and child-order lifecycle (new/amend/cancel/fill).
-* Peer-group and pre-trade cost models (volatility-, spread- and
-  size-conditioned expected cost), with flags relative to expectation rather
-  than to the raw book.
+* Pre-trade cost models (volatility-, spread- and size-conditioned
+  expected cost), with flags relative to an order's expected cost rather
+  than to other orders in its symbol.
 * An opportunity-cost treatment of unfilled quantity and benchmark
   customisation per desk (arrival, open, close, interval VWAP).
 * A calibrated market-impact model (permanent and temporary) fitted to the
